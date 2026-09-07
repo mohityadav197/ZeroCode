@@ -142,6 +142,15 @@ def analyze_file(payload: AnalyzeRequest, db: DBSession = Depends(get_db)):
 
     orchestrator.update_context("filename", payload.filename)
     orchestrator.update_context("analysis_result", result)
+    orchestrator.update_context("insights", result.get("insights", []))
+    orchestrator.update_context(
+        "charts_generated",
+        list((result.get("charts", {}) or {}).get("charts", {}).keys()),
+    )
+    orchestrator.update_context("outliers", (result.get("outliers", {}) or {}).get("outliers", {}))
+    orchestrator.update_context("target_balance", result.get("target_balance", {}))
+    orchestrator.update_context("missing_values", (result.get("profile", {}) or {}).get("missing", {}))
+    orchestrator.update_context("quality_score", (result.get("profile", {}) or {}).get("quality_score", 0))
 
     if payload.session_id:
         save_analysis_result(db, payload.session_id, result)
@@ -185,6 +194,15 @@ def train_file(payload: TrainRequest, db: DBSession = Depends(get_db)):
     orchestrator.update_context("ml_result", result)
     orchestrator.update_context("target_col", payload.target_col)
     orchestrator.update_context("problem_type", payload.problem_type)
+    orchestrator.update_context("leaderboard", result.get("leaderboard", []))
+    orchestrator.update_context("best_model", result.get("best_model_name"))
+    orchestrator.update_context("preprocessing_log", result.get("preprocessing_log", []))
+    orchestrator.update_context("model_reasoning", result.get("model_reasoning", {}))
+
+    if result.get("shap_analysis"):
+        orchestrator.update_context("shap_result", result.get("shap_analysis"))
+        orchestrator.update_context("feature_importance", result.get("shap_analysis", {}).get("feature_importance", []))
+        orchestrator.update_context("shap_explanation", result.get("shap_analysis", {}).get("explanation", ""))
 
     if payload.session_id:
         save_ml_result(db, payload.session_id, result)
