@@ -1,0 +1,8 @@
+cd C:\Users\MOHIT\Desktop\ZeroCode\backend
+conda activate venv
+uvicorn app:app --reload --port 8000
+
+
+
+cd C:\Users\MOHIT\Desktop\ZeroCode\frontend
+npm run dev

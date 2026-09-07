@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.db
+.env
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Anaconda
+*.conda
+
+# Backend outputs (generated files, not code)
+backend/outputs/charts/
+backend/outputs/*.pkl
+backend/outputs/*.csv
+backend/outputs/*.py
+backend/outputs/*.html
+backend/outputs/*.json
+backend/outputs/.gitkeep
+
+# Keep outputs folder but ignore contents
+!backend/outputs/.gitkeep
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker volumes
+postgres_data/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: zerocode_db
+      POSTGRES_USER: zerocode
+      POSTGRES_PASSWORD: zerocode123
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
