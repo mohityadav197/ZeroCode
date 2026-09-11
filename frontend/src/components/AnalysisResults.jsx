@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react'
-import { animate, motion } from 'framer-motion'
-import { AlertTriangle, Hash, Lightbulb, Rows3, Target as TargetIcon } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { AnimatePresence, animate, motion } from 'framer-motion'
+import { AlertTriangle, ChevronDown, Hash, Lightbulb, Rows3, Sparkles, Target as TargetIcon } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { CONFIDENCE_STYLES } from './DomainBadge'
 
 function qualityColor(score) {
   if (score > 80) return '#10b981'
@@ -100,6 +101,82 @@ function CustomTooltip({ active, payload, label }) {
   )
 }
 
+function DomainBanner({ domainInfo }) {
+  const [tipsOpen, setTipsOpen] = useState(false)
+
+  if (!domainInfo) return null
+
+  const confidence = CONFIDENCE_STYLES[domainInfo.confidence] || CONFIDENCE_STYLES.none
+  const tips = domainInfo.domain_tips || []
+
+  return (
+    <div className="glass-card p-5">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+        <span className="text-5xl leading-none shrink-0">{domainInfo.icon}</span>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-bold text-white">{domainInfo.display_name}</h3>
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${confidence.className}`}>
+              {confidence.label}
+            </span>
+          </div>
+          <p className="text-sm text-slate-500 mt-0.5">{domainInfo.description}</p>
+          {domainInfo.matched_keywords?.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2.5">
+              {domainInfo.matched_keywords.map((kw) => (
+                <span
+                  key={kw}
+                  className="text-[11px] font-medium text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded-full"
+                >
+                  {kw}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {tips.length > 0 && (
+          <button
+            onClick={() => setTipsOpen((v) => !v)}
+            className="glass-card flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:text-white hover:shadow-[0_0_16px_rgba(99,102,241,0.4)] transition-shadow duration-200 shrink-0 self-start sm:self-center"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-indigo-300" />
+            Domain Tips
+            <ChevronDown className={`w-3.5 h-3.5 transition-transform duration-200 ${tipsOpen ? 'rotate-180' : ''}`} />
+          </button>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {tipsOpen && tips.length > 0 && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25 }}
+            className="overflow-hidden"
+          >
+            <div className="mt-4 pt-4 border-t border-white/10">
+              <p className="text-sm font-semibold text-slate-200 mb-2.5">
+                💡 Tips for {domainInfo.display_name} datasets
+              </p>
+              <ul className="space-y-2">
+                {tips.map((tip, i) => (
+                  <li key={i} className="flex items-start gap-2 text-sm text-slate-300">
+                    <Lightbulb className="w-4 h-4 shrink-0 mt-0.5 text-amber-300" />
+                    <span>{tip}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
 function AnalysisResults({ result }) {
   if (!result) return null
 
@@ -129,6 +206,8 @@ function AnalysisResults({ result }) {
 
   return (
     <div className="space-y-5">
+      <DomainBanner domainInfo={result.domain_info} />
+
       <Card title="Dataset Profile">
         <div className="flex justify-center sm:justify-start mb-5">
           <QualityRing score={profile.quality_score ?? 0} />

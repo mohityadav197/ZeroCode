@@ -19,6 +19,41 @@ function Card({ title, children }) {
   )
 }
 
+function ConfusionMatrixHeatmap({ matrix }) {
+  if (!Array.isArray(matrix) || matrix.length === 0) return null
+
+  const max = Math.max(...matrix.flat(), 1)
+  const n = matrix.length
+
+  return (
+    <div>
+      <p className="text-xs text-slate-500 mb-2">
+        Confusion Matrix <span className="text-slate-600">(rows = actual, columns = predicted)</span>
+      </p>
+      <div className="inline-grid gap-1" style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
+        {matrix.map((row, i) =>
+          row.map((value, j) => {
+            const intensity = value / max
+            return (
+              <div
+                key={`${i}-${j}`}
+                title={`Actual ${i}, Predicted ${j}: ${value}`}
+                className="w-12 h-12 flex items-center justify-center rounded-md text-xs font-bold"
+                style={{
+                  backgroundColor: `rgba(99, 102, 241, ${0.12 + intensity * 0.75})`,
+                  color: intensity > 0.55 ? '#ffffff' : '#c7d2fe',
+                }}
+              >
+                {value}
+              </div>
+            )
+          })
+        )}
+      </div>
+    </div>
+  )
+}
+
 function ModelResults({ result }) {
   if (!result) return null
 
@@ -75,7 +110,7 @@ function ModelResults({ result }) {
             </div>
             <div className="flex flex-wrap gap-2 mb-4">
               {Object.entries(bestEntry || {})
-                .filter(([key]) => !['rank', 'model', 'is_best', 'training_time'].includes(key))
+                .filter(([key]) => !['rank', 'model', 'is_best', 'training_time', 'confusion_matrix'].includes(key))
                 .map(([key, value]) => (
                   <span
                     key={key}
@@ -85,6 +120,11 @@ function ModelResults({ result }) {
                   </span>
                 ))}
             </div>
+            {bestEntry?.confusion_matrix && (
+              <div className="mb-4">
+                <ConfusionMatrixHeatmap matrix={bestEntry.confusion_matrix} />
+              </div>
+            )}
             {Object.keys(bestParams || {}).length > 0 && (
               <div>
                 <p className="text-xs text-slate-500 mb-1.5">Best hyperparameters</p>

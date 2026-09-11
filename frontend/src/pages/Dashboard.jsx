@@ -1,13 +1,15 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { motion } from 'framer-motion'
-import { Clock, Plus, RotateCcw } from 'lucide-react'
+import { ArrowRight, Clock, Plus, RotateCcw } from 'lucide-react'
 import FileUpload from '../components/FileUpload'
 import DataPreview from '../components/DataPreview'
 import PipelineTracker from '../components/PipelineTracker'
 import AnalysisResults from '../components/AnalysisResults'
 import ModelResults from '../components/ModelResults'
-import ModelSelector from '../components/ModelSelector'
+import ModelRecommendations from '../components/ModelRecommendations'
+import PreprocessingPanel from '../components/PreprocessingPanel'
+import MetricsSelector from '../components/MetricsSelector'
 import DownloadPanel from '../components/DownloadPanel'
 import ChartDisplay from '../components/ChartDisplay'
 import ChatPanel from '../components/ChatPanel'
@@ -16,6 +18,7 @@ import ConfirmDialog from '../components/ConfirmDialog'
 import {
   analyzeData,
   generateReport,
+  getPreprocessingRecommendations,
   getSession,
   getSessions,
   trainModels,
@@ -99,7 +102,7 @@ function RecentSessions({ sessions, onRestore, restoringId }) {
   )
 }
 
-const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
+const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChange }, ref) {
   const [sessionId, setSessionId] = useState(null)
   const [sessions, setSessions] = useState([])
   const [restoringId, setRestoringId] = useState(null)
@@ -111,6 +114,11 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
   const [reportResult, setReportResult] = useState(null)
   const [pipelineSteps, setPipelineSteps] = useState(INITIAL_STEPS)
   const [selectedExtraModels, setSelectedExtraModels] = useState([])
+  const [selectedMetrics, setSelectedMetrics] = useState([])
+  const [modelsConfirmed, setModelsConfirmed] = useState(false)
+  const [preprocessingRecs, setPreprocessingRecs] = useState(null)
+  const [preprocessingChoices, setPreprocessingChoices] = useState({})
+  const [preprocessingApplied, setPreprocessingApplied] = useState(false)
   const [loadingMessage, setLoadingMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [checklistOpen, setChecklistOpen] = useState(false)
@@ -155,6 +163,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
     try {
       const result = await analyzeData(uploadedFile, null, visualOptions ?? null, sessionId)
       setAnalysisResult(result)
+      onDomainChange?.(result.domain_info ?? null)
       updateStep(1, 'done')
       await updateContext('filename', uploadedFile)
       await updateContext('analysis_result', result)
@@ -170,10 +179,38 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
     }
   }
 
-  const handleTrainModels = async () => {
+  const handleModelsContinue = async (modelNames) => {
+    if (!uploadedFile || !analysisResult) return
+    const targetCol = analysisResult.target_suggestion?.suggested_target
+    setSelectedExtraModels(modelNames)
+    setModelsConfirmed(true)
+    setPreprocessingRecs(null)
+    setPreprocessingChoices({})
+    setPreprocessingApplied(false)
+    setLoadingMessage('Analyzing preprocessing needs...')
+    try {
+      const recs = await getPreprocessingRecommendations(uploadedFile, targetCol, modelNames.length ? modelNames : null)
+      setPreprocessingRecs(recs)
+    } catch (err) {
+      const msg = err.response?.data?.detail || err.message || 'Failed to load preprocessing recommendations'
+      toast.error(msg)
+      setModelsConfirmed(false)
+    } finally {
+      setLoadingMessage('')
+    }
+  }
+
+  const handlePreprocessingApply = () => {
+    setPreprocessingApplied(true)
+  }
+
+  const handleTrainModels = async (modelNames, metricNames) => {
     if (!uploadedFile || !analysisResult) return
     const targetCol = analysisResult.target_suggestion?.suggested_target
     const problemType = analysisResult.problem_type?.problem_type
+    const models = modelNames && modelNames.length ? modelNames : selectedExtraModels
+    const metrics = metricNames && metricNames.length ? metricNames : selectedMetrics
+    if (metricNames) setSelectedMetrics(metricNames)
     setErrorMessage('')
     updateStep(2, 'running')
     setLoadingMessage('Training models...')
@@ -182,7 +219,9 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
         uploadedFile,
         targetCol,
         problemType,
-        selectedExtraModels.length ? selectedExtraModels : null,
+        models.length ? models : null,
+        metrics.length ? metrics : null,
+        Object.keys(preprocessingChoices).length ? preprocessingChoices : null,
         sessionId
       )
       console.log('Train result:', result)
@@ -252,6 +291,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
       const doneUpTo = STATUS_STEP_INDEX[session.status] ?? 0
       setPipelineSteps(INITIAL_STEPS.map((s, i) => ({ ...s, status: i <= doneUpTo ? 'done' : 'waiting' })))
       onDatasetChange?.(session.filename)
+      onDomainChange?.(data.analysis_result?.domain_info ?? null)
       toast.success(`Restored session for ${session.filename}`)
     } catch (err) {
       toast.error(err.response?.data?.detail || err.message || 'Failed to restore session')
@@ -280,12 +320,18 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
     setMlResult(null)
     setReportResult(null)
     setSelectedExtraModels([])
+    setSelectedMetrics([])
+    setModelsConfirmed(false)
+    setPreprocessingRecs(null)
+    setPreprocessingChoices({})
+    setPreprocessingApplied(false)
     setPipelineSteps(INITIAL_STEPS)
     setLoadingMessage('')
     setErrorMessage('')
     setChecklistOpen(false)
     setNewSessionModalOpen(false)
     onDatasetChange?.(null)
+    onDomainChange?.(null)
     refreshSessions()
     scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
   }
@@ -356,19 +402,44 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange }, ref) {
             </div>
 
             {!mlResult && (
-              <div className="space-y-4">
-                <ModelSelector
-                  problemType={analysisResult.problem_type?.problem_type}
+              <>
+                <ModelRecommendations
+                  recommendations={analysisResult.model_recommendations}
                   onSelectionChange={setSelectedExtraModels}
+                  onContinue={handleModelsContinue}
+                  loading={loadingMessage !== ''}
+                  confirmed={modelsConfirmed}
                 />
-                <button
-                  onClick={handleTrainModels}
-                  disabled={loadingMessage !== ''}
-                  className="gradient-btn"
-                >
-                  Train Models
-                </button>
-              </div>
+
+                {preprocessingRecs && (
+                  <PreprocessingPanel
+                    recommendations={preprocessingRecs}
+                    onChoicesChange={setPreprocessingChoices}
+                    onApply={handlePreprocessingApply}
+                    loading={loadingMessage !== ''}
+                  />
+                )}
+
+                {preprocessingApplied && (
+                  <MetricsSelector
+                    problemType={analysisResult.problem_type?.problem_type}
+                    onSelectionChange={setSelectedMetrics}
+                  />
+                )}
+
+                {preprocessingApplied && (
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => handleTrainModels(selectedExtraModels, selectedMetrics)}
+                      disabled={loadingMessage !== ''}
+                      className="gradient-btn flex items-center justify-center gap-2 rounded-full"
+                    >
+                      Proceed to Train
+                      <ArrowRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}

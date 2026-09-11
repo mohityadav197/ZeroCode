@@ -1,8 +1,41 @@
 import { useMemo, useState } from 'react'
 import { ArrowDown, ArrowUp, Trophy } from 'lucide-react'
 
+const METRIC_LABELS = {
+  accuracy: 'Accuracy',
+  f1: 'F1',
+  precision: 'Precision',
+  recall: 'Recall',
+  roc_auc: 'ROC-AUC',
+  log_loss: 'Log Loss',
+  mcc: 'MCC',
+  cohen_kappa: "Cohen's Kappa",
+  balanced_accuracy: 'Balanced Acc.',
+  mae: 'MAE',
+  rmse: 'RMSE',
+  r2: 'R2',
+  mape: 'MAPE',
+  explained_variance: 'Expl. Variance',
+  max_error: 'Max Error',
+  median_ae: 'Median AE',
+  adjusted_r2: 'Adj. R2',
+}
+
+const CLASSIFICATION_METRIC_ORDER = [
+  'accuracy', 'f1', 'precision', 'recall', 'roc_auc', 'log_loss', 'mcc', 'cohen_kappa', 'balanced_accuracy',
+]
+const REGRESSION_METRIC_ORDER = ['mae', 'rmse', 'r2', 'mape', 'explained_variance', 'max_error', 'median_ae', 'adjusted_r2']
+
+// Higher-is-better, roughly 0-1 bounded metrics — eligible for green/yellow/red pills.
+// Error-scale metrics (mae, rmse, log_loss, mape, max_error, median_ae) are left neutral
+// since "> 0.8 = good" would be meaningless (and often backwards) on their scale.
+const SCORE_METRICS = new Set([
+  'accuracy', 'f1', 'precision', 'recall', 'r2', 'roc_auc', 'mcc', 'cohen_kappa', 'balanced_accuracy',
+  'explained_variance', 'adjusted_r2',
+])
+
 function metricPillClass(key, value) {
-  if (!['accuracy', 'f1', 'precision', 'recall', 'r2'].includes(key)) {
+  if (!SCORE_METRICS.has(key) || typeof value !== 'number') {
     return 'bg-white/10 text-slate-300'
   }
   if (value > 0.8) return 'bg-emerald-500/20 text-emerald-300'
@@ -15,25 +48,15 @@ function Leaderboard({ leaderboard = [] }) {
   const [sortDir, setSortDir] = useState('desc')
 
   const isRegression = leaderboard.length > 0 && 'r2' in leaderboard[0]
+  const metricOrder = isRegression ? REGRESSION_METRIC_ORDER : CLASSIFICATION_METRIC_ORDER
+  const presentMetrics = metricOrder.filter((key) => leaderboard.some((row) => row[key] !== undefined))
 
-  const columns = isRegression
-    ? [
-        { key: 'rank', label: 'Rank' },
-        { key: 'model', label: 'Model' },
-        { key: 'mae', label: 'MAE' },
-        { key: 'rmse', label: 'RMSE' },
-        { key: 'r2', label: 'R2' },
-        { key: 'training_time', label: 'Time' },
-      ]
-    : [
-        { key: 'rank', label: 'Rank' },
-        { key: 'model', label: 'Model' },
-        { key: 'accuracy', label: 'Accuracy' },
-        { key: 'f1', label: 'F1' },
-        { key: 'precision', label: 'Precision' },
-        { key: 'recall', label: 'Recall' },
-        { key: 'training_time', label: 'Time' },
-      ]
+  const columns = [
+    { key: 'rank', label: 'Rank' },
+    { key: 'model', label: 'Model' },
+    ...presentMetrics.map((key) => ({ key, label: METRIC_LABELS[key] || key })),
+    { key: 'training_time', label: 'Time' },
+  ]
 
   const sortedData = useMemo(() => {
     if (!sortKey) return leaderboard
@@ -107,7 +130,7 @@ function Leaderboard({ leaderboard = [] }) {
                     <span className="text-slate-400">{row[col.key]}</span>
                   ) : (
                     <span className={`text-xs font-semibold px-2 py-1 rounded-full ${metricPillClass(col.key, row[col.key])}`}>
-                      {row[col.key]}
+                      {row[col.key] ?? '—'}
                     </span>
                   )}
                 </td>

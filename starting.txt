@@ -1,8 +1,27 @@
+Step 1 — Start Docker Desktop
+Open Docker Desktop from Windows search
+Wait until you see "Engine running"
+
+Step 2 — Start PostgreSQL
+
+cmd
+cd C:\Users\MOHIT\Desktop\ZeroCode
+docker-compose up -d postgres
+
+Step 3 — Start Backend
+
+cmd
 cd C:\Users\MOHIT\Desktop\ZeroCode\backend
 conda activate venv
 uvicorn app:app --reload --port 8000
 
+Step 4 — Start Frontend
+Open second CMD:
 
-
+cmd
 cd C:\Users\MOHIT\Desktop\ZeroCode\frontend
 npm run dev
+
+Step 5 — Open Browser
+
+http://localhost:5173

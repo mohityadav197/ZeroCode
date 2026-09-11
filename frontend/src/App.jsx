@@ -5,10 +5,12 @@ import { ArrowLeft } from 'lucide-react'
 import './App.css'
 import Landing from './pages/Landing'
 import Dashboard from './pages/Dashboard'
+import DomainBadge from './components/DomainBadge'
 
 function App() {
   const [showDashboard, setShowDashboard] = useState(false)
   const [datasetName, setDatasetName] = useState(null)
+  const [domainInfo, setDomainInfo] = useState(null)
   const dashboardRef = useRef(null)
 
   return (
@@ -52,6 +54,7 @@ function App() {
                   {datasetName}
                 </span>
               )}
+              {domainInfo && domainInfo.confidence !== 'none' && <DomainBadge domainInfo={domainInfo} />}
             </div>
             <p className="text-xs text-slate-400">Zero Code. Full Insight.</p>
           </motion.header>
@@ -80,7 +83,7 @@ function App() {
               transition={{ duration: 0.4 }}
               className="w-full flex flex-1 min-h-0"
             >
-              <Dashboard ref={dashboardRef} onDatasetChange={setDatasetName} />
+              <Dashboard ref={dashboardRef} onDatasetChange={setDatasetName} onDomainChange={setDomainInfo} />
             </motion.div>
           )}
         </AnimatePresence>

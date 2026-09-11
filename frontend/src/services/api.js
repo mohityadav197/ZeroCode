@@ -25,13 +25,32 @@ export const analyzeData = async (filename, confirmedTarget = null, visualOption
   return res.data
 }
 
-export const trainModels = async (filename, targetCol, problemType, extraModels = null, sessionId = null) => {
+export const trainModels = async (
+  filename,
+  targetCol,
+  problemType,
+  extraModels = null,
+  selectedMetrics = null,
+  userPreprocessingChoices = null,
+  sessionId = null
+) => {
   const res = await api.post('/train', {
     filename,
     target_col: targetCol,
     problem_type: problemType,
     extra_models: extraModels,
+    selected_metrics: selectedMetrics,
+    user_preprocessing_choices: userPreprocessingChoices,
     session_id: sessionId,
+  })
+  return res.data
+}
+
+export const getPreprocessingRecommendations = async (filename, targetCol, selectedModels = null) => {
+  const res = await api.post('/preprocessing-recommendations', {
+    filename,
+    target_col: targetCol,
+    selected_models: selectedModels,
   })
   return res.data
 }

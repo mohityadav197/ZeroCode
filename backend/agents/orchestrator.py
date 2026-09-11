@@ -53,6 +53,7 @@ class Orchestrator:
 
             # Full analysis data
             "analysis_result": None,
+            "domain_info": None,
             "quality_score": None,
             "insights": [],
             "column_types": {},
@@ -130,6 +131,17 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     def build_context_prompt(self, intent: str) -> str:
+        domain_info = self.session_context.get("domain_info")
+        domain_line = ""
+        if domain_info:
+            domain_line = (
+                f"Dataset Domain: {domain_info.get('display_name')} "
+                f"({domain_info.get('confidence')} confidence)\n\n"
+            )
+        return domain_line + self._build_intent_prompt(intent)
+
+    # ------------------------------------------------------------------
+    def _build_intent_prompt(self, intent: str) -> str:
         ctx = self.session_context
         analysis_result = ctx.get("analysis_result")
         ml_result = ctx.get("ml_result")

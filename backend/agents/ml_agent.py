@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 import shap
 from sklearn.ensemble import (
     AdaBoostClassifier,
+    AdaBoostRegressor,
     ExtraTreesClassifier,
     RandomForestClassifier,
     RandomForestRegressor,
@@ -24,17 +25,27 @@ from sklearn.ensemble import (
 from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, LogisticRegression, Ridge
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
+    cohen_kappa_score,
+    confusion_matrix as sk_confusion_matrix,
+    explained_variance_score,
     f1_score,
+    log_loss,
+    matthews_corrcoef,
+    max_error as sk_max_error,
     mean_absolute_error,
+    mean_absolute_percentage_error,
     mean_squared_error,
+    median_absolute_error,
     precision_score,
     r2_score,
     recall_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import RandomizedSearchCV, train_test_split
 from sklearn.naive_bayes import GaussianNB
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler, StandardScaler
 from sklearn.svm import SVC, SVR
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
@@ -72,6 +83,36 @@ SHAP_TREE_MODELS = {
 SHAP_LINEAR_MODELS = {
     "Logistic Regression", "Linear Regression", "Ridge", "Lasso", "ElasticNet",
 }
+
+CORE_CLASSIFICATION_METRICS = ["accuracy", "f1", "precision", "recall"]
+CORE_REGRESSION_METRICS = ["mae", "rmse", "r2"]
+EXTENDED_CLASSIFICATION_METRICS = [
+    "roc_auc", "log_loss", "mcc", "cohen_kappa", "balanced_accuracy", "confusion_matrix",
+]
+EXTENDED_REGRESSION_METRICS = [
+    "mape", "explained_variance", "max_error", "median_ae", "adjusted_r2",
+]
+
+MODEL_REASON_FALLBACKS = {
+    "Logistic Regression": "Simple, fast linear baseline that's easy to interpret.",
+    "Linear Regression": "Simple, fast linear baseline that's easy to interpret.",
+    "Random Forest": "Robust general-purpose model, handles mixed features and outliers well.",
+    "Random Forest Regressor": "Robust general-purpose model, handles mixed features and outliers well.",
+    "XGBoost": "Strong gradient boosting performance, especially on larger datasets.",
+    "XGBoost Regressor": "Strong gradient boosting performance, especially on larger datasets.",
+    "SVM": "Effective on smaller datasets with clear separation between classes.",
+    "SVR": "Effective on smaller datasets with clear non-linear patterns.",
+    "Decision Tree": "Simple, interpretable baseline to compare other models against.",
+    "Decision Tree Regressor": "Simple, interpretable baseline to compare other models against.",
+    "KNN": "Distance-based model that works best on smaller, low-dimensional data.",
+    "KNN Regressor": "Distance-based model that works best on smaller, low-dimensional data.",
+    "AdaBoost": "Boosting approach that can help correct for imbalanced classes.",
+    "AdaBoost Regressor": "Boosting approach that focuses on hard-to-predict samples.",
+}
+
+SCALE_SENSITIVE_MODELS = {"SVM", "KNN", "Logistic Regression"}
+SCALE_INVARIANT_MODELS = {"Random Forest", "XGBoost"}
+OUTLIER_SENSITIVE_MODELS = {"SVM", "KNN"}
 
 PARAM_GRIDS = {
     "Random Forest": {"n_estimators": [50, 100, 200], "max_depth": [None, 5, 10, 20], "min_samples_split": [2, 5, 10]},
@@ -116,15 +157,58 @@ class MLAgent:
         self.llm = LLMProvider()
 
     # ------------------------------------------------------------------
-    def preprocess(self, df: pd.DataFrame, target_col: str, problem_type: str) -> dict:
+    @staticmethod
+    def _auto_missing_action(series: pd.Series, is_numeric: bool) -> str:
+        if is_numeric:
+            try:
+                skew = float(series.skew())
+            except Exception:
+                skew = 0.0
+            return "fill_median" if abs(skew) > 1 else "fill_mean"
+        return "fill_mode"
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _auto_encoding_action(nunique: int) -> str:
+        if nunique == 2:
+            return "binary_encode"
+        if nunique <= 10:
+            return "onehot_encode"
+        return "label_encode"
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _auto_outlier_action(outlier_pct: float, selected_models: set) -> str:
+        if outlier_pct <= 5:
+            return "keep"
+        if outlier_pct <= 20:
+            return "cap_iqr" if selected_models & OUTLIER_SENSITIVE_MODELS else "keep"
+        return "cap_iqr"
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _auto_scaling_action(selected_models: set) -> str:
+        if selected_models & SCALE_SENSITIVE_MODELS:
+            return "standard_scale"
+        if selected_models and selected_models.issubset(SCALE_INVARIANT_MODELS):
+            return "none"
+        return "standard_scale"
+
+    # ------------------------------------------------------------------
+    def preprocess(
+        self, df: pd.DataFrame, target_col: str, problem_type: str,
+        user_choices: dict = None, selected_models: list = None,
+    ) -> dict:
         log = []
         df = df.copy()
         rows = len(df)
+        user_choices = user_choices or {}
+        models_set = set(selected_models or [])
 
         y = df[target_col]
         X = df.drop(columns=[target_col])
 
-        # b) drop useless columns
+        # b) drop useless columns (locked — never user-overridable)
         for col in list(X.columns):
             nunique = X[col].nunique()
             if rows > 0 and nunique == rows:
@@ -136,21 +220,48 @@ class MLAgent:
 
         # c) missing values
         for col in list(X.columns):
-            missing_pct = X[col].isna().mean() * 100
-            if missing_pct > 50:
-                X = X.drop(columns=[col])
-                log.append(f"Dropped '{col}' — more than 50% missing ({missing_pct:.1f}%)")
+            missing_pct = round(float(X[col].isna().mean() * 100), 2)
+            is_numeric = pd.api.types.is_numeric_dtype(X[col])
+            auto_action = "none" if missing_pct == 0 else (
+                "drop" if missing_pct >= 50 else self._auto_missing_action(X[col], is_numeric)
+            )
+            user_action = (user_choices.get(col) or {}).get("missing")
+            action = user_action or auto_action
+
+            if user_action and user_action != auto_action:
+                log.append(f"User override: {col} → {action} (AI suggested: {auto_action})")
+
+            if action == "none":
                 continue
-            if missing_pct > 0:
-                if pd.api.types.is_numeric_dtype(X[col]):
-                    median_val = X[col].median()
-                    X[col] = X[col].fillna(median_val)
-                    log.append(f"Filled '{col}' with median ({median_val})")
-                else:
-                    mode_series = X[col].mode()
-                    mode_val = mode_series.iloc[0] if not mode_series.empty else "Unknown"
-                    X[col] = X[col].fillna(mode_val)
-                    log.append(f"Filled '{col}' with mode ('{mode_val}')")
+            if action == "drop":
+                X = X.drop(columns=[col])
+                log.append(f"Dropped '{col}' — {missing_pct}% missing")
+                continue
+            if action == "fill_median":
+                fill_val = X[col].median()
+                X[col] = X[col].fillna(fill_val)
+                log.append(f"Filled '{col}' with median ({fill_val})")
+            elif action == "fill_mean":
+                fill_val = X[col].mean()
+                X[col] = X[col].fillna(fill_val)
+                log.append(f"Filled '{col}' with mean ({fill_val})")
+            elif action == "fill_zero":
+                X[col] = X[col].fillna(0)
+                log.append(f"Filled '{col}' with 0")
+            elif action == "fill_mode":
+                mode_series = X[col].mode()
+                mode_val = mode_series.iloc[0] if not mode_series.empty else "Unknown"
+                X[col] = X[col].fillna(mode_val)
+                log.append(f"Filled '{col}' with mode ('{mode_val}')")
+            elif action == "fill_unknown":
+                X[col] = X[col].fillna("Unknown")
+                log.append(f"Filled '{col}' with 'Unknown'")
+
+        # Capture genuinely-numeric columns BEFORE encoding — label/one-hot/binary
+        # encoding produces new numeric-dtype columns that are nominal codes, not
+        # continuous values, so outlier detection/capping and scaling must only
+        # ever consider the original numeric columns, not post-encoding artifacts.
+        original_numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
 
         # d) encode categorical columns
         label_encoders = {}
@@ -159,12 +270,24 @@ class MLAgent:
                 continue
 
             nunique = X[col].nunique()
-            if nunique == 2:
+            auto_action = self._auto_encoding_action(nunique)
+            user_action = (user_choices.get(col) or {}).get("encoding")
+            action = user_action or auto_action
+
+            if user_action and user_action != auto_action:
+                log.append(f"User override: {col} → {action} (AI suggested: {auto_action})")
+
+            if action == "drop":
+                X = X.drop(columns=[col])
+                log.append(f"Dropped '{col}' column per encoding choice")
+            elif action == "binary_encode":
                 uniques = sorted(X[col].dropna().unique().tolist(), key=str)
+                if len(uniques) < 2:
+                    uniques = uniques + [uniques[0] if uniques else "Unknown"]
                 mapping = {uniques[0]: 0, uniques[1]: 1}
-                X[col] = X[col].map(mapping)
+                X[col] = X[col].map(mapping).fillna(0)
                 log.append(f"Binary encoded '{col}' ({mapping})")
-            elif nunique < 10:
+            elif action == "onehot_encode":
                 dummies = pd.get_dummies(X[col], prefix=col).astype(int)
                 X = X.drop(columns=[col])
                 X = pd.concat([X, dummies], axis=1)
@@ -175,12 +298,67 @@ class MLAgent:
                 label_encoders[col] = le
                 log.append(f"Label encoded '{col}' ({nunique} categories)")
 
-        # e) scale numeric features
-        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-        scaler = StandardScaler()
-        if numeric_cols:
-            X[numeric_cols] = scaler.fit_transform(X[numeric_cols])
-            log.append(f"Applied StandardScaler to numeric columns ({len(numeric_cols)} columns)")
+        # e) outlier handling (original numeric columns only — see note above)
+        for col in [c for c in original_numeric_cols if c in X.columns]:
+            series = X[col].dropna()
+            if series.empty:
+                continue
+            q1, q3 = series.quantile(0.25), series.quantile(0.75)
+            iqr = q3 - q1
+            lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+            outlier_pct = round(float(((series < lower) | (series > upper)).mean() * 100), 2)
+            if outlier_pct == 0:
+                continue
+
+            auto_action = self._auto_outlier_action(outlier_pct, models_set)
+            user_action = (user_choices.get(col) or {}).get("outliers")
+            action = user_action or auto_action
+
+            if user_action and user_action != auto_action:
+                log.append(f"User override: {col} → {action} (AI suggested: {auto_action})")
+
+            if action == "cap_iqr":
+                X[col] = X[col].clip(lower=lower, upper=upper)
+                log.append(f"Capped '{col}' outliers to IQR bounds ({outlier_pct}% affected)")
+            elif action == "log_transform":
+                shift = abs(min(X[col].min(), 0)) + 1
+                X[col] = np.log1p(X[col] + shift)
+                log.append(f"Applied log transform to '{col}' ({outlier_pct}% outliers)")
+
+        # f) scale numeric features — grouped per-column choice (standard/minmax/none)
+        numeric_cols = [c for c in original_numeric_cols if c in X.columns]
+        standard_cols, minmax_cols = [], []
+        for col in numeric_cols:
+            auto_action = self._auto_scaling_action(models_set)
+            user_action = (user_choices.get(col) or {}).get("scaling")
+            action = user_action or auto_action
+
+            if user_action and user_action != auto_action:
+                log.append(f"User override: {col} → {action} (AI suggested: {auto_action})")
+
+            if action == "standard_scale":
+                standard_cols.append(col)
+            elif action == "minmax_scale":
+                minmax_cols.append(col)
+
+        standard_scaler = None
+        if standard_cols:
+            standard_scaler = StandardScaler()
+            X[standard_cols] = standard_scaler.fit_transform(X[standard_cols])
+            log.append(f"Applied StandardScaler to {len(standard_cols)} column(s): {standard_cols}")
+
+        minmax_scaler = None
+        if minmax_cols:
+            minmax_scaler = MinMaxScaler()
+            X[minmax_cols] = minmax_scaler.fit_transform(X[minmax_cols])
+            log.append(f"Applied MinMaxScaler to {len(minmax_cols)} column(s): {minmax_cols}")
+
+        scaler = {
+            "standard": standard_scaler,
+            "minmax": minmax_scaler,
+            "standard_cols": standard_cols,
+            "minmax_cols": minmax_cols,
+        }
 
         # encode target if classification and non-numeric
         target_encoder = None
@@ -386,6 +564,11 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
 
         if problem_type in CLASSIFICATION_TYPES:
             factories = {
+                "Logistic Regression": lambda: LogisticRegression(class_weight=class_weight, max_iter=1000),
+                "Random Forest": lambda: RandomForestClassifier(n_estimators=100, class_weight=class_weight, random_state=42),
+                "XGBoost": lambda: XGBClassifier(eval_metric="mlogloss", random_state=42) if XGBClassifier is not None else None,
+                "SVM": lambda: SVC(class_weight=class_weight),
+                "Decision Tree": lambda: DecisionTreeClassifier(class_weight=class_weight, random_state=42),
                 "KNN": lambda: KNeighborsClassifier(n_neighbors=5),
                 "AdaBoost": lambda: AdaBoostClassifier(),
                 "Extra Trees": lambda: ExtraTreesClassifier(class_weight=class_weight, random_state=42),
@@ -395,7 +578,13 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
             }
         else:
             factories = {
+                "Linear Regression": lambda: LinearRegression(),
+                "Random Forest Regressor": lambda: RandomForestRegressor(n_estimators=100, random_state=42),
+                "XGBoost Regressor": lambda: XGBRegressor(random_state=42) if XGBRegressor is not None else None,
+                "SVR": lambda: SVR(),
+                "Decision Tree Regressor": lambda: DecisionTreeRegressor(random_state=42),
                 "KNN Regressor": lambda: KNeighborsRegressor(),
+                "AdaBoost Regressor": lambda: AdaBoostRegressor(),
                 "Lasso": lambda: Lasso(),
                 "Ridge": lambda: Ridge(),
                 "ElasticNet": lambda: ElasticNet(),
@@ -410,7 +599,36 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
         return factory()
 
     # ------------------------------------------------------------------
-    def train_models(self, selected_models, X_train, X_test, y_train, y_test, problem_type: str) -> dict:
+    @staticmethod
+    def _safe_metric(fn, round_digits=4):
+        try:
+            value = fn()
+            if value is None:
+                return None
+            if round_digits is None:
+                return value
+            return round(float(value), round_digits)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _safe_mape(y_true, y_pred):
+        try:
+            y_true_arr = np.asarray(y_true, dtype=float)
+            y_pred_arr = np.asarray(y_pred, dtype=float)
+            mask = y_true_arr != 0
+            if mask.sum() == 0:
+                return None
+            pct_errors = np.abs((y_true_arr[mask] - y_pred_arr[mask]) / y_true_arr[mask])
+            return round(float(np.mean(pct_errors) * 100), 4)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    def train_models(self, selected_models, X_train, X_test, y_train, y_test, problem_type: str, selected_metrics: list = None) -> dict:
+        is_classification = problem_type in CLASSIFICATION_TYPES
+        extended = set(selected_metrics or [])
         results = {}
 
         for name, model in selected_models.items():
@@ -420,26 +638,86 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
                 elapsed = time.time() - start
                 preds = model.predict(X_test)
 
-                if problem_type in CLASSIFICATION_TYPES:
-                    results[name] = {
-                        "model": model,
-                        "accuracy": round(float(accuracy_score(y_test, preds)), 4),
-                        "f1": round(float(f1_score(y_test, preds, average="weighted", zero_division=0)), 4),
-                        "precision": round(float(precision_score(y_test, preds, average="weighted", zero_division=0)), 4),
-                        "recall": round(float(recall_score(y_test, preds, average="weighted", zero_division=0)), 4),
-                        "training_time": f"{elapsed:.2f}s",
-                    }
+                metrics = {}
+
+                if is_classification:
+                    metrics["accuracy"] = self._safe_metric(lambda: accuracy_score(y_test, preds))
+                    metrics["f1"] = self._safe_metric(lambda: f1_score(y_test, preds, average="weighted", zero_division=0))
+                    metrics["precision"] = self._safe_metric(lambda: precision_score(y_test, preds, average="weighted", zero_division=0))
+                    metrics["recall"] = self._safe_metric(lambda: recall_score(y_test, preds, average="weighted", zero_division=0))
+
+                    proba = None
+                    if "roc_auc" in extended or "log_loss" in extended:
+                        if hasattr(model, "predict_proba"):
+                            try:
+                                proba = model.predict_proba(X_test)
+                            except Exception:
+                                proba = None
+
+                    if "roc_auc" in extended:
+                        def _roc_auc():
+                            if proba is None:
+                                raise ValueError("predict_proba not available")
+                            if proba.shape[1] == 2:
+                                return roc_auc_score(y_test, proba[:, 1])
+                            return roc_auc_score(y_test, proba, multi_class="ovr", average="weighted")
+                        metrics["roc_auc"] = self._safe_metric(_roc_auc)
+
+                    if "log_loss" in extended:
+                        def _log_loss():
+                            if proba is None:
+                                raise ValueError("predict_proba not available")
+                            return log_loss(y_test, proba)
+                        metrics["log_loss"] = self._safe_metric(_log_loss)
+
+                    if "mcc" in extended:
+                        metrics["mcc"] = self._safe_metric(lambda: matthews_corrcoef(y_test, preds))
+
+                    if "cohen_kappa" in extended:
+                        metrics["cohen_kappa"] = self._safe_metric(lambda: cohen_kappa_score(y_test, preds))
+
+                    if "balanced_accuracy" in extended:
+                        metrics["balanced_accuracy"] = self._safe_metric(lambda: balanced_accuracy_score(y_test, preds))
+
+                    if "confusion_matrix" in extended:
+                        metrics["confusion_matrix"] = self._safe_metric(
+                            lambda: sk_confusion_matrix(y_test, preds).tolist(), round_digits=None
+                        )
+
                 else:
                     mae = mean_absolute_error(y_test, preds)
                     rmse = mean_squared_error(y_test, preds) ** 0.5
                     r2 = r2_score(y_test, preds)
-                    results[name] = {
-                        "model": model,
-                        "mae": round(float(mae), 4),
-                        "rmse": round(float(rmse), 4),
-                        "r2": round(float(r2), 4),
-                        "training_time": f"{elapsed:.2f}s",
-                    }
+                    metrics["mae"] = round(float(mae), 4)
+                    metrics["rmse"] = round(float(rmse), 4)
+                    metrics["r2"] = round(float(r2), 4)
+
+                    if "mape" in extended:
+                        metrics["mape"] = self._safe_mape(y_test, preds)
+
+                    if "explained_variance" in extended:
+                        metrics["explained_variance"] = self._safe_metric(lambda: explained_variance_score(y_test, preds))
+
+                    if "max_error" in extended:
+                        metrics["max_error"] = self._safe_metric(lambda: sk_max_error(y_test, preds))
+
+                    if "median_ae" in extended:
+                        metrics["median_ae"] = self._safe_metric(lambda: median_absolute_error(y_test, preds))
+
+                    if "adjusted_r2" in extended:
+                        def _adjusted_r2():
+                            n = len(y_test)
+                            k = X_test.shape[1]
+                            if n - k - 1 <= 0:
+                                return None
+                            return 1 - (1 - r2) * (n - 1) / (n - k - 1)
+                        metrics["adjusted_r2"] = self._safe_metric(_adjusted_r2)
+
+                results[name] = {
+                    "model": model,
+                    "metrics": metrics,
+                    "training_time": f"{elapsed:.2f}s",
+                }
             except Exception as e:
                 results[name] = {"error": str(e)}
 
@@ -477,9 +755,11 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
         metric_key = "r2" if problem_type == "regression" else "f1"
         valid_results = {name: r for name, r in results.items() if "error" not in r}
 
-        sorted_names = sorted(
-            valid_results.keys(), key=lambda n: valid_results[n][metric_key], reverse=True
-        )
+        def sort_key(name):
+            value = valid_results[name].get("metrics", {}).get(metric_key)
+            return value if value is not None else float("-inf")
+
+        sorted_names = sorted(valid_results.keys(), key=sort_key, reverse=True)
 
         leaderboard = []
         for i, name in enumerate(sorted_names):
@@ -490,15 +770,7 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
                 "training_time": r["training_time"],
                 "is_best": i == 0,
             }
-            if problem_type == "regression":
-                entry.update({"mae": r["mae"], "rmse": r["rmse"], "r2": r["r2"]})
-            else:
-                entry.update({
-                    "accuracy": r["accuracy"],
-                    "f1": r["f1"],
-                    "precision": r["precision"],
-                    "recall": r["recall"],
-                })
+            entry.update(r.get("metrics", {}))
             leaderboard.append(entry)
 
         best_model_name = sorted_names[0] if sorted_names else None
@@ -525,6 +797,211 @@ print("Saved preprocessed_data.csv with shape:", cleaned_df.shape)
             "model_path": model_path.replace("\\", "/"),
             "feature_names_path": feature_names_path.replace("\\", "/"),
             "scaler_path": scaler_path.replace("\\", "/"),
+        }
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _score_candidate_models(
+        rows, numeric_features, categorical_features, has_outliers, is_imbalanced, size_category, is_regression
+    ) -> dict:
+        total_features = numeric_features + categorical_features
+        few_categorical = categorical_features <= 3
+        few_features = total_features <= 6
+        many_features = total_features > 10
+
+        if is_regression:
+            names = {
+                "linear": "Linear Regression",
+                "forest": "Random Forest Regressor",
+                "xgb": "XGBoost Regressor",
+                "svm": "SVR",
+                "tree": "Decision Tree Regressor",
+                "knn": "KNN Regressor",
+                "ada": "AdaBoost Regressor",
+            }
+            xgb_available = XGBRegressor is not None
+        else:
+            names = {
+                "linear": "Logistic Regression",
+                "forest": "Random Forest",
+                "xgb": "XGBoost",
+                "svm": "SVM",
+                "tree": "Decision Tree",
+                "knn": "KNN",
+                "ada": "AdaBoost",
+            }
+            xgb_available = XGBClassifier is not None
+
+        scores = {}
+
+        s = 0
+        if rows < 5000:
+            s += 2
+        if few_categorical:
+            s += 2
+        if has_outliers:
+            s -= 1
+        scores[names["linear"]] = {"score": s, "tag": "Baseline Model"}
+
+        s = 3
+        if numeric_features > 0 and categorical_features > 0:
+            s += 2
+        if has_outliers:
+            s += 1
+        scores[names["forest"]] = {"score": s, "tag": "Recommended"}
+
+        if xgb_available:
+            s = 0
+            if rows > 1000:
+                s += 3
+            if is_imbalanced:
+                s += 2
+            if many_features:
+                s += 2
+            scores[names["xgb"]] = {"score": s, "tag": "Recommended" if s > 4 else None}
+
+        s = 0
+        if rows < 2000:
+            s += 3
+        if rows > 5000:
+            s -= 2
+        if few_features:
+            s += 1
+        scores[names["svm"]] = {"score": s, "tag": None}
+
+        scores[names["tree"]] = {"score": 1, "tag": "Baseline Model"}
+
+        s = 0
+        if rows < 3000:
+            s += 2
+        if rows > 5000:
+            s -= 2
+        if many_features:
+            s -= 1
+        scores[names["knn"]] = {"score": s, "tag": None}
+
+        s = 0
+        if is_imbalanced:
+            s += 2
+        if size_category == "medium":
+            s += 1
+        scores[names["ada"]] = {"score": s, "tag": None}
+
+        return scores
+
+    # ------------------------------------------------------------------
+    def _get_model_reasons(
+        self, model_names, rows, columns, problem_type, size_category,
+        has_outliers, is_imbalanced, numeric_features, categorical_features
+    ) -> dict:
+        model_list_str = ", ".join(model_names)
+        prompt = (
+            "You are a data science expert.\n"
+            "Given this dataset:\n"
+            f"- Rows: {rows}\n"
+            f"- Columns: {columns}\n"
+            f"- Problem: {problem_type}\n"
+            f"- Data size: {size_category}\n"
+            f"- Has outliers: {'yes' if has_outliers else 'no'}\n"
+            f"- Target imbalanced: {'yes' if is_imbalanced else 'no'}\n"
+            f"- Feature types: {numeric_features} numeric, {categorical_features} categorical\n\n"
+            "For each of these models explain in ONE short sentence (max 15 words) why it "
+            "is or isn't suitable for this specific dataset:\n"
+            f"{model_list_str}\n\n"
+            "Return JSON only, an object mapping each model name exactly as given to its one-sentence reason."
+        )
+        system_prompt = "Respond with valid JSON only: an object whose keys are exactly the given model names."
+
+        try:
+            result = self.llm.ask_json(prompt, system_prompt=system_prompt)
+        except Exception:
+            result = {}
+
+        if isinstance(result, dict) and result:
+            return {name: reason for name, reason in result.items() if isinstance(reason, str)}
+        return {}
+
+    # ------------------------------------------------------------------
+    def generate_model_recommendations(self, df: pd.DataFrame, problem_type: str, profile: dict, analysis_result: dict) -> dict:
+        is_regression = problem_type == "regression"
+        rows = df.shape[0]
+
+        target_col = (analysis_result or {}).get("target_suggestion", {}).get("suggested_target")
+        id_like_columns = set(profile.get("id_like_columns", []))
+        column_types = profile.get("column_types", {})
+        feature_types = {
+            col: t for col, t in column_types.items()
+            if col != target_col and col not in id_like_columns
+        }
+        numeric_features = sum(1 for t in feature_types.values() if t == "numeric")
+        categorical_features = sum(1 for t in feature_types.values() if t == "categorical")
+
+        outliers_map = (analysis_result or {}).get("outliers", {}).get("outliers", {}) or {}
+        has_outliers = any(info.get("count", 0) > 0 for info in outliers_map.values())
+
+        target_balance = (analysis_result or {}).get("target_balance", {}) or {}
+        is_imbalanced = (not is_regression) and (not target_balance.get("is_balanced", True))
+
+        if rows < 1000:
+            size_category = "small"
+        elif rows <= 10000:
+            size_category = "medium"
+        else:
+            size_category = "large"
+
+        scores = self._score_candidate_models(
+            rows=rows,
+            numeric_features=numeric_features,
+            categorical_features=categorical_features,
+            has_outliers=has_outliers,
+            is_imbalanced=is_imbalanced,
+            size_category=size_category,
+            is_regression=is_regression,
+        )
+
+        ranked = sorted(scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
+
+        reasons = self._get_model_reasons(
+            model_names=[name for name, _ in ranked],
+            rows=rows,
+            columns=profile.get("columns", df.shape[1]),
+            problem_type=problem_type,
+            size_category=size_category,
+            has_outliers=has_outliers,
+            is_imbalanced=is_imbalanced,
+            numeric_features=numeric_features,
+            categorical_features=categorical_features,
+        )
+
+        min_recommended = min(3, len(ranked))
+        recommended = []
+        optional = []
+        for i, (name, info) in enumerate(ranked):
+            entry = {
+                "name": name,
+                "score": info["score"],
+                "reason": reasons.get(name) or MODEL_REASON_FALLBACKS.get(name, "Included based on your dataset's characteristics."),
+            }
+            if i < min_recommended:
+                entry["tag"] = "Recommended"
+                entry["pre_selected"] = True
+                recommended.append(entry)
+            else:
+                entry["tag"] = "Optional"
+                entry["pre_selected"] = False
+                optional.append(entry)
+
+        return {
+            "recommended": recommended,
+            "optional": optional,
+            "data_summary": {
+                "rows": rows,
+                "size_category": size_category,
+                "has_outliers": has_outliers,
+                "is_imbalanced": is_imbalanced,
+                "numeric_features": numeric_features,
+                "categorical_features": categorical_features,
+            },
         }
 
     # ------------------------------------------------------------------
@@ -792,14 +1269,40 @@ predictions = model.predict(X_test)
             return {"status": "shap_failed", "reason": str(e)}
 
     # ------------------------------------------------------------------
-    def run_full_ml_pipeline(self, df: pd.DataFrame, target_col: str, problem_type: str, extra_models: list = None) -> dict:
-        prep = self.preprocess(df, target_col, problem_type)
+    @staticmethod
+    def _peek_default_model_names(problem_type: str, rows: int) -> list:
+        # Mirrors select_models()'s name choices without instantiating
+        # anything — used only to inform preprocessing (outliers/scaling)
+        # of which models will train, before use_class_weight is known.
+        if problem_type in CLASSIFICATION_TYPES:
+            names = ["Random Forest", "Logistic Regression", "Decision Tree"]
+            names.append("XGBoost" if rows > 1000 and XGBClassifier is not None else "SVM")
+        else:
+            names = ["Random Forest Regressor", "Linear Regression", "Decision Tree Regressor"]
+            names.append("XGBoost Regressor" if rows > 1000 and XGBRegressor is not None else "SVR")
+        return names
 
-        selection = self.select_models(problem_type, df, prep["use_class_weight"])
-        selected_models = selection["selected_models"]
-        reasoning = selection["reasoning"]
+    # ------------------------------------------------------------------
+    def run_full_ml_pipeline(
+        self, df: pd.DataFrame, target_col: str, problem_type: str,
+        extra_models: list = None, selected_metrics: list = None,
+        user_preprocessing_choices: dict = None,
+    ) -> dict:
+        model_names_for_preprocessing = extra_models or self._peek_default_model_names(problem_type, len(df))
+
+        prep = self.preprocess(
+            df, target_col, problem_type,
+            user_choices=user_preprocessing_choices,
+            selected_models=model_names_for_preprocessing,
+        )
+
+        selected_models = {}
+        reasoning = {}
 
         if extra_models:
+            # An explicit list (e.g. from Model Recommendations) is the
+            # complete desired training set, not an addition to the
+            # automatic defaults.
             for name in extra_models:
                 model = self.get_model_from_name(name, problem_type, prep["use_class_weight"])
                 if model is None:
@@ -807,8 +1310,18 @@ predictions = model.predict(X_test)
                 selected_models[name] = model
                 reasoning[name] = "User selected this model manually"
 
+        if not selected_models:
+            selection = self.select_models(problem_type, df, prep["use_class_weight"])
+            selected_models = selection["selected_models"]
+            reasoning = selection["reasoning"]
+
+        is_classification = problem_type in CLASSIFICATION_TYPES
+        core_metrics = CORE_CLASSIFICATION_METRICS if is_classification else CORE_REGRESSION_METRICS
+        effective_metrics = core_metrics + [m for m in (selected_metrics or []) if m not in core_metrics]
+
         train_result = self.train_models(
-            selected_models, prep["X_train"], prep["X_test"], prep["y_train"], prep["y_test"], problem_type
+            selected_models, prep["X_train"], prep["X_test"], prep["y_train"], prep["y_test"], problem_type,
+            selected_metrics=selected_metrics,
         )
         results = train_result["results"]
 
@@ -825,6 +1338,7 @@ predictions = model.predict(X_test)
                 "tuning_score": None,
                 "saved_files": {},
                 "ml_code_path": None,
+                "selected_metrics": effective_metrics,
                 "status": "failed",
             }
 
@@ -861,5 +1375,6 @@ predictions = model.predict(X_test)
             "saved_files": save_result,
             "shap_analysis": shap_result,
             "ml_code_path": ml_code_path,
+            "selected_metrics": effective_metrics,
             "status": "completed",
         }

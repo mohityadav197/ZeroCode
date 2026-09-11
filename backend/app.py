@@ -140,6 +140,11 @@ def analyze_file(payload: AnalyzeRequest, db: DBSession = Depends(get_db)):
 
     result = analysis_agent.run_full_analysis(df, confirmed_target=payload.confirmed_target)
 
+    problem_type_str = (result.get("problem_type", {}) or {}).get("problem_type")
+    profile = result.get("profile", {}) or {}
+    model_recs = ml_agent.generate_model_recommendations(df, problem_type_str, profile, result)
+    result["model_recommendations"] = model_recs
+
     orchestrator.update_context("filename", payload.filename)
     orchestrator.update_context("analysis_result", result)
     orchestrator.update_context("insights", result.get("insights", []))
@@ -151,6 +156,8 @@ def analyze_file(payload: AnalyzeRequest, db: DBSession = Depends(get_db)):
     orchestrator.update_context("target_balance", result.get("target_balance", {}))
     orchestrator.update_context("missing_values", (result.get("profile", {}) or {}).get("missing", {}))
     orchestrator.update_context("quality_score", (result.get("profile", {}) or {}).get("quality_score", 0))
+    orchestrator.update_context("model_recommendations", model_recs)
+    orchestrator.update_context("domain_info", result.get("domain_info"))
 
     if payload.session_id:
         save_analysis_result(db, payload.session_id, result)
@@ -162,11 +169,43 @@ def analyze_file(payload: AnalyzeRequest, db: DBSession = Depends(get_db)):
     return clean_for_json(result)
 
 
+class PreprocessingRecommendationsRequest(BaseModel):
+    filename: str
+    target_col: str
+    selected_models: Optional[List[str]] = None
+
+
+@app.post("/preprocessing-recommendations")
+def preprocessing_recommendations(payload: PreprocessingRecommendationsRequest):
+    filepath = os.path.join(UPLOAD_FOLDER, payload.filename)
+    if not os.path.isfile(filepath):
+        raise HTTPException(status_code=404, detail=f"File '{payload.filename}' not found.")
+
+    try:
+        df = pd.read_csv(filepath)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read CSV file: {e}")
+
+    if payload.target_col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Target column '{payload.target_col}' not found in dataset.")
+
+    profile = analysis_agent.profile_data(df)
+    domain_info = analysis_agent.detect_domain(df, profile)
+    result = analysis_agent.generate_preprocessing_recommendations(
+        df, profile, domain_info,
+        target_col=payload.target_col,
+        selected_models=payload.selected_models,
+    )
+    return clean_for_json(result)
+
+
 class TrainRequest(BaseModel):
     filename: str
     target_col: str
     problem_type: str
     extra_models: Optional[List[str]] = None
+    selected_metrics: Optional[List[str]] = None
+    user_preprocessing_choices: Optional[dict] = None
     session_id: Optional[str] = None
 
 
@@ -189,6 +228,8 @@ def train_file(payload: TrainRequest, db: DBSession = Depends(get_db)):
         target_col=payload.target_col,
         problem_type=payload.problem_type,
         extra_models=payload.extra_models,
+        selected_metrics=payload.selected_metrics,
+        user_preprocessing_choices=payload.user_preprocessing_choices,
     )
 
     orchestrator.update_context("ml_result", result)
