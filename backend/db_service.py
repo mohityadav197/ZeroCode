@@ -171,3 +171,19 @@ def get_chat_history(db, session_id, limit=20):
 
 def get_all_sessions(db, limit=10):
     return db.query(Session).order_by(Session.created_at.desc()).limit(limit).all()
+
+
+def delete_session(db, session_id) -> bool:
+    session = db.query(Session).filter(Session.session_id == session_id).first()
+    if session is None:
+        return False
+
+    db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
+    db.query(GeneratedFile).filter(GeneratedFile.session_id == session_id).delete()
+    db.query(SHAPResult).filter(SHAPResult.session_id == session_id).delete()
+    db.query(MLResult).filter(MLResult.session_id == session_id).delete()
+    db.query(AnalysisResult).filter(AnalysisResult.session_id == session_id).delete()
+    db.query(Session).filter(Session.session_id == session_id).delete()
+
+    db.commit()
+    return True

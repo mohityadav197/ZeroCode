@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
-import { motion } from 'framer-motion'
-import { ArrowRight, Clock, Plus, RotateCcw } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ArrowRight, Clock, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import FileUpload from '../components/FileUpload'
 import DataPreview from '../components/DataPreview'
 import PipelineTracker from '../components/PipelineTracker'
@@ -17,6 +17,7 @@ import VisualChecklist from '../components/VisualChecklist'
 import ConfirmDialog from '../components/ConfirmDialog'
 import {
   analyzeData,
+  deleteSession,
   generateReport,
   getPreprocessingRecommendations,
   getSession,
@@ -52,51 +53,132 @@ function SkeletonBlock({ lines = 3 }) {
   )
 }
 
-function RecentSessions({ sessions, onRestore, restoringId }) {
+function RecentSessions({ sessions, onRestore, restoringId, onDelete, onClearAll }) {
+  const [confirmingId, setConfirmingId] = useState(null)
+  const [confirmingAll, setConfirmingAll] = useState(false)
+
   if (!sessions.length) return null
 
   return (
     <div className="glass-card p-5">
-      <div className="flex items-center gap-2 mb-4">
-        <Clock className="w-4 h-4 text-indigo-400" />
-        <h3 className="text-sm font-semibold text-slate-300">Recent Sessions</h3>
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Clock className="w-4 h-4 text-indigo-400" />
+          <h3 className="text-sm font-semibold text-slate-300">Recent Sessions</h3>
+        </div>
+        <div className="relative">
+          <button
+            onClick={() => setConfirmingAll(true)}
+            className="text-xs font-semibold text-red-300 border border-red-500/30 rounded-full px-3 py-1 hover:bg-red-500/10 transition-colors"
+          >
+            Clear All
+          </button>
+          <AnimatePresence>
+            {confirmingAll && (
+              <motion.div
+                initial={{ opacity: 0, y: -6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-0 top-full mt-2 z-20 w-64 glass-card p-3 shadow-xl"
+                style={{ backgroundColor: '#14142a' }}
+              >
+                <p className="text-xs text-slate-200 mb-3">Delete ALL sessions? This cannot be undone.</p>
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    onClick={() => setConfirmingAll(false)}
+                    className="text-xs font-semibold text-slate-400 hover:text-slate-200 px-2 py-1"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      setConfirmingAll(false)
+                      onClearAll()
+                    }}
+                    className="text-xs font-semibold bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-lg transition-colors"
+                  >
+                    Delete All
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {sessions.slice(0, 5).map((s, i) => (
-          <motion.div
-            key={s.session_id}
-            initial={{ opacity: 0, y: 12 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, delay: i * 0.06 }}
-            className="rounded-xl border border-white/10 bg-white/[0.03] p-3.5 flex flex-col gap-2"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-sm font-semibold text-slate-100 truncate">{s.filename}</p>
-              <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0 ${STATUS_BADGE[s.status] || STATUS_BADGE.uploaded}`}>
-                {s.status}
-              </span>
-            </div>
-            {s.best_model && (
-              <p className="text-xs text-slate-400">
-                Best: <span className="text-emerald-300 font-medium">{s.best_model}</span>
-                {s.accuracy != null && ` (${(s.accuracy * 100).toFixed(1)}%)`}
-              </p>
-            )}
-            <div className="flex items-center justify-between mt-1">
-              <span className="text-[11px] text-slate-500">
-                {s.created_at ? new Date(s.created_at).toLocaleDateString() : ''}
-              </span>
+        <AnimatePresence>
+          {sessions.slice(0, 5).map((s, i) => (
+            <motion.div
+              key={s.session_id}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              transition={{ duration: 0.3, delay: i * 0.06 }}
+              className="group relative rounded-xl border border-white/10 bg-white/[0.03] p-3.5 flex flex-col gap-2"
+            >
               <button
-                onClick={() => onRestore(s)}
-                disabled={restoringId === s.session_id}
-                className="flex items-center gap-1 text-xs font-semibold text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50"
+                onClick={() => setConfirmingId(s.session_id)}
+                title="Delete this session"
+                className="absolute -top-2 -right-2 w-7 h-7 rounded-full glass-card flex items-center justify-center text-red-400 opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-red-500/20 hover:text-red-300 z-10"
               >
-                <RotateCcw className="w-3 h-3" />
-                {restoringId === s.session_id ? 'Restoring…' : 'Restore'}
+                <Trash2 className="w-3.5 h-3.5" />
               </button>
-            </div>
-          </motion.div>
-        ))}
+
+              {confirmingId === s.session_id && (
+                <div
+                  className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 rounded-xl p-3 text-center"
+                  style={{ backgroundColor: 'rgba(15,15,26,0.97)' }}
+                >
+                  <p className="text-xs text-slate-200">Delete this session? This cannot be undone.</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setConfirmingId(null)}
+                      className="text-xs font-semibold text-slate-400 hover:text-slate-200 px-2.5 py-1"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => {
+                        setConfirmingId(null)
+                        onDelete(s.session_id)
+                      }}
+                      className="text-xs font-semibold bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded-lg transition-colors"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-100 truncate">{s.filename}</p>
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full shrink-0 ${STATUS_BADGE[s.status] || STATUS_BADGE.uploaded}`}>
+                  {s.status}
+                </span>
+              </div>
+              {s.best_model && (
+                <p className="text-xs text-slate-400">
+                  Best: <span className="text-emerald-300 font-medium">{s.best_model}</span>
+                  {s.accuracy != null && ` (${(s.accuracy * 100).toFixed(1)}%)`}
+                </p>
+              )}
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-[11px] text-slate-500">
+                  {s.created_at ? new Date(s.created_at).toLocaleDateString() : ''}
+                </span>
+                <button
+                  onClick={() => onRestore(s)}
+                  disabled={restoringId === s.session_id}
+                  className="flex items-center gap-1 text-xs font-semibold text-indigo-300 hover:text-indigo-200 transition-colors disabled:opacity-50"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  {restoringId === s.session_id ? 'Restoring…' : 'Restore'}
+                </button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
       </div>
     </div>
   )
@@ -139,6 +221,30 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
   useEffect(() => {
     refreshSessions()
   }, [])
+
+  const handleDeleteSession = async (sessionIdToDelete) => {
+    setSessions((prev) => prev.filter((s) => s.session_id !== sessionIdToDelete))
+    try {
+      await deleteSession(sessionIdToDelete)
+      toast.success('Session deleted successfully')
+    } catch (err) {
+      toast.error(err.response?.data?.detail || err.message || 'Failed to delete session')
+      refreshSessions()
+    }
+  }
+
+  const handleClearAllSessions = async () => {
+    const ids = sessions.map((s) => s.session_id)
+    setSessions([])
+    const results = await Promise.allSettled(ids.map((id) => deleteSession(id)))
+    const failedCount = results.filter((r) => r.status === 'rejected').length
+    if (failedCount > 0) {
+      toast.error(`Failed to delete ${failedCount} session${failedCount === 1 ? '' : 's'}`)
+      refreshSessions()
+    } else {
+      toast.success('All sessions cleared')
+    }
+  }
 
   const updateStep = (index, status) => {
     setPipelineSteps((prev) => prev.map((s, i) => (i === index ? { ...s, status } : s)))
@@ -360,7 +466,13 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
         <PipelineTracker steps={pipelineSteps} onRetry={handleRetry} onStepClick={handleStepClick} />
 
         {!uploadInfo && !analysisResult && (
-          <RecentSessions sessions={sessions} onRestore={handleRestoreSession} restoringId={restoringId} />
+          <RecentSessions
+            sessions={sessions}
+            onRestore={handleRestoreSession}
+            restoringId={restoringId}
+            onDelete={handleDeleteSession}
+            onClearAll={handleClearAllSessions}
+          />
         )}
 
         {!uploadInfo && !analysisResult && (

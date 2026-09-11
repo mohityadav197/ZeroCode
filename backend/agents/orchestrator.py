@@ -12,7 +12,13 @@ RECOMMENDATION_KEYWORDS = ["improve", "recommend", "suggest", "next", "what shou
 INTENT_KEYWORDS = {
     "data_question": ["rows", "columns", "shape", "size"],
     "eda_question": ["insight", "insights", "finding", "findings"],
-    "model_question": ["model", "accuracy", "f1", "train", "svm", "forest", "predict"],
+    "model_question": [
+        "model", "accuracy", "f1", "train", "svm", "forest", "predict",
+        "xgboost", "logistic regression", "decision tree", "knn", "adaboost",
+        "naive bayes", "lightgbm", "catboost", "extra trees",
+        "linear regression", "elasticnet", "ridge", "lasso",
+        "win", "best model", "leaderboard", "compare",
+    ],
     "preprocessing_question": ["preprocess", "clean", "encode", "drop"],
     "chart_question": [
         "chart", "histogram", "heatmap", "boxplot", "distribution",
@@ -20,8 +26,17 @@ INTENT_KEYWORDS = {
         "plot", "graph", "show me",
     ],
     "shap_question": [
-        "shap", "feature importance", "why did", "which feature",
+        # NOTE: a bare "why did" used to live here and swallowed any
+        # "why did <model name> win/do well" question — those have no
+        # other shap-ish word, so they'd win on a single generic match
+        # even though they're really asking about the leaderboard, not
+        # per-sample feature attribution. Narrowed to phrasings that
+        # actually ask about a *prediction*, which model_question's own
+        # "model"/"predict" keywords don't cleanly cover on their own.
+        "shap", "feature importance", "which feature",
         "what matters", "feature impact", "explain prediction", "why model",
+        "why did the model predict", "why did it predict",
+        "why does it predict", "why does the model predict",
     ],
     "outlier_question": ["outlier", "anomaly", "extreme values", "unusual"],
     "missing_question": ["missing", "null", "empty", "nan", "filled"],

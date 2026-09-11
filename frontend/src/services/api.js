@@ -90,6 +90,11 @@ export const getSessionFiles = async (sessionId) => {
   return res.data
 }
 
+export const deleteSession = async (sessionId) => {
+  const res = await api.delete(`/sessions/${sessionId}`)
+  return res.data
+}
+
 export const getDownloadUrl = (item) => `${BASE_URL}/download/${item}`
 
 export default api

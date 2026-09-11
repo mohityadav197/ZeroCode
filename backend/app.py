@@ -18,9 +18,10 @@ from agents.analysis_agent import AnalysisAgent
 from agents.ml_agent import MLAgent
 from agents.orchestrator import Orchestrator
 from config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE_MB, PROJECT_NAME, UPLOAD_FOLDER
-from database import get_db, init_db
+from database import GeneratedFile, get_db, init_db
 from db_service import (
     create_session,
+    delete_session,
     get_all_sessions,
     get_analysis_result,
     get_chat_history,
@@ -245,6 +246,11 @@ def train_file(payload: TrainRequest, db: DBSession = Depends(get_db)):
         orchestrator.update_context("feature_importance", result.get("shap_analysis", {}).get("feature_importance", []))
         orchestrator.update_context("shap_explanation", result.get("shap_analysis", {}).get("explanation", ""))
 
+    print("Orchestrator context after training:")
+    for k, v in orchestrator.session_context.items():
+        line = f"  {k}: {str(v)[:100]}"
+        print(line.encode("ascii", errors="replace").decode("ascii"))
+
     if payload.session_id:
         save_ml_result(db, payload.session_id, result)
 
@@ -332,11 +338,19 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 def chat(payload: ChatRequest, db: DBSession = Depends(get_db)):
+    print("Session ID in chat:", payload.session_id)
+
     if payload.session_id:
         history = get_chat_history(db, payload.session_id)
         orchestrator.session_context["chat_history"] = [
             {"role": m.role, "content": m.message} for m in history
         ]
+
+    print("Context at chat time:")
+    best_model_line = f"best_model: {orchestrator.session_context.get('best_model')}"
+    leaderboard_line = f"leaderboard: {orchestrator.session_context.get('leaderboard')}"
+    print(best_model_line.encode("ascii", errors="replace").decode("ascii"))
+    print(leaderboard_line.encode("ascii", errors="replace").decode("ascii"))
 
     response = orchestrator.chat(payload.message)
 
@@ -440,6 +454,40 @@ def get_session_detail(session_id: str, db: DBSession = Depends(get_db)):
 def get_session_download_files(session_id: str, db: DBSession = Depends(get_db)):
     files = get_session_files(db, session_id)
     return clean_for_json([{"file_type": f.file_type, "file_path": f.file_path} for f in files])
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session_route(session_id: str, db: DBSession = Depends(get_db)):
+    # outputs/ is a single shared folder reused by every session (each new
+    # /train or /analyze run overwrites the same filenames), so a file path
+    # recorded for this session may still be "owned" by another session's
+    # records. Only delete a physical file if no other session references
+    # the same path — otherwise we'd silently destroy another session's
+    # (possibly the currently active one's) downloadable artifacts.
+    session_files = db.query(GeneratedFile).filter(GeneratedFile.session_id == session_id).all()
+    file_paths = {f.file_path for f in session_files if f.file_path}
+
+    other_paths = set()
+    if file_paths:
+        other_records = (
+            db.query(GeneratedFile)
+            .filter(GeneratedFile.session_id != session_id, GeneratedFile.file_path.in_(file_paths))
+            .all()
+        )
+        other_paths = {f.file_path for f in other_records}
+
+    deleted = delete_session(db, session_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+
+    for path in file_paths - other_paths:
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except Exception:
+            pass  # best effort — never fail the request over file cleanup
+
+    return {"status": "deleted", "session_id": session_id}
 
 
 if __name__ == "__main__":
