@@ -132,6 +132,7 @@ class BlackboardState(Contract):
     logs: list[dict[str, Any]] = Field(default_factory=list)
     trace_ids: list[str] = Field(default_factory=list)
     tokens_used: int = 0
+    input_tokens: int = 0
 
 
 STAGE_INPUTS = dict(zip(

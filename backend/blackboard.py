@@ -62,8 +62,11 @@ class Blackboard:
     def add_error(self, stage, error):
         self._mutate(lambda state: state.errors.append({"stage": stage, "error": str(error), "timestamp": utc_now()}))
 
-    def add_tokens(self, count):
-        self._mutate(lambda state: setattr(state, "tokens_used", state.tokens_used + count))
+    def add_tokens(self, count, input_tokens=0):
+        def write(state):
+            state.tokens_used += count
+            state.input_tokens += input_tokens
+        self._mutate(write)
 
     def add_trace(self, trace_id):
         def write(state):

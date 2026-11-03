@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from openai import OpenAI
 
 import app as app_module
-from mcp_tools import mcp_groq
+from mcp_tools import mcp_llm
 
 
 QUESTION = "what are n_estimators in XGBoost"
@@ -29,9 +29,9 @@ def llm_transport(monkeypatch):
 
             return OpenAI(**options, http_client=httpx.Client(transport=httpx.MockTransport(respond)))
 
-        monkeypatch.setattr(mcp_groq, "GEMINI_API_KEY", "test-key")
-        monkeypatch.setattr(mcp_groq, "OpenAI", create_client)
-        monkeypatch.setattr(mcp_groq, "RETRY_DELAY_SECONDS", 0)
+        monkeypatch.setattr(mcp_llm, "GEMINI_API_KEY", "test-key")
+        monkeypatch.setattr(mcp_llm, "OpenAI", create_client)
+        monkeypatch.setattr(mcp_llm, "RETRY_DELAY_SECONDS", 0)
         return requests
 
     return install
@@ -88,7 +88,7 @@ def test_chat_route_deadline_bounds_a_stuck_worker(monkeypatch):
 
 
 def test_chat_missing_key_is_a_visible_provider_error(monkeypatch):
-    monkeypatch.setattr(mcp_groq, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(mcp_llm, "GEMINI_API_KEY", "")
     with TestClient(app_module.app) as client:
         response = client.post("/chat", json={"message": QUESTION})
     assert response.status_code == 500

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from mcp_tools.contracts import CSVInput, CSVOutput, LLMInput, LLMOutput, QueryInput, QueryOutput
 from mcp_tools.mcp_database import query_database
 from mcp_tools.mcp_file_parser import parse_csv
-from mcp_tools.mcp_groq import call_llm
+from mcp_tools.mcp_llm import call_llm
 
 
 @dataclass

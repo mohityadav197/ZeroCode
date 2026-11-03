@@ -47,7 +47,7 @@ def call_llm(prompt: str, system: str = "") -> str:
                 logger.warning("Gemini returned %s, retrying (attempt %s/%s)...", status, attempt, MAX_RETRIES)
                 time.sleep(RETRY_DELAY_SECONDS)
     if response.usage and current_session.get() != "legacy":
-        Blackboard(current_session.get()).add_tokens(response.usage.total_tokens)
+        Blackboard(current_session.get()).add_tokens(response.usage.total_tokens, response.usage.prompt_tokens or 0)
     content = response.choices[0].message.content if response.choices else ""
     if not content or not content.strip():
         raise LLMRequestError("Gemini returned an empty response")

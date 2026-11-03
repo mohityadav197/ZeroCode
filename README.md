@@ -143,20 +143,20 @@ From `backend`:
 ../.venv/Scripts/python.exe -m eval.run_evaluation --offline --no-charts --output-dir eval/results_offline
 ```
 
-The schedule contains 36 ordinary runs (3 datasets × 3 ordinary variants × 4 repetitions) and 4 adversarial runs. It exercises all pipeline patterns and both messaging modes. Every run records measured total/per-agent time, model, dataset SHA-256, actual reported Groq tokens, success/outcome and an estimated cost at the task's assumed **$0.05 per million tokens**. This is an evaluation assumption, not a provider price quotation. An expected adversarial block counts as a successful guardrail test and has `outcome=blocked`.
+The schedule contains 36 ordinary runs (3 datasets × 3 ordinary variants × 4 repetitions) and 4 adversarial runs. It exercises all pipeline patterns and both messaging modes. Every run records measured total/per-agent time, model, dataset SHA-256, actual reported input and output tokens, success/outcome and an estimated cost at assumed Gemini 1.5 Flash rates of **$0.075 per million input tokens and $0.30 per million output tokens**. This is an evaluation assumption, not a price quotation for the configured model. An expected adversarial block counts as a successful guardrail test and has `outcome=blocked`.
 
 The runner looks for `titanic.csv`, `hr_analytics.csv` and `finance_fraud.csv`. It also accepts this checkout's existing `hr_test.csv` and `finance_test.csv` as aliases, records their actual source paths, and copies inputs into isolated evaluation directories. Source CSVs are not modified. All runs use the same Naive Bayes baseline so differences in model selection do not confound prompt comparisons.
 
-Results are checkpointed after every run. The runner writes `eval_results.csv`, `eval_summary.csv` (count/mean/std/min/max by variant) and `eval_boxplot.png`, grouped by dataset. The default output directory is `backend/eval/results`. Provider failures remain in the results and make the command exit nonzero; the chart/summary include failed and blocked attempts explicitly. Live measurements can be affected by Groq quotas and cold starts. Offline results execute the real frameworks and ML pipeline with fixture LLM text, report zero provider tokens, and are labeled `llm_mode=offline`; they are integration measurements rather than live model benchmarks. `--no-charts` excludes EDA chart export; model explainability remains part of training.
+Results are checkpointed after every run. The runner writes `eval_results.csv`, `eval_summary.csv` (count/mean/std/min/max by variant) and `eval_boxplot.png`, grouped by dataset. The default output directory is `backend/eval/results`. Provider failures remain in the results and make the command exit nonzero; the chart/summary include failed and blocked attempts explicitly. Live measurements can be affected by Gemini quotas and cold starts. Offline results execute the real frameworks and ML pipeline with fixture LLM text, report zero provider tokens, and are labeled `llm_mode=offline`; they are integration measurements rather than live model benchmarks. `--no-charts` excludes EDA chart export; model explainability remains part of training.
 
 Recorded validation on November 2, 2026: **23 backend tests passed**; frontend build and lint completed (existing warnings remain). MCP stdio calls, PostgreSQL metadata queries and an exported Jaeger trace were verified. See [validation evidence and package versions](backend/eval/validation.json).
 
 | Evaluation | Completed pipelines | Provider quota failures | Expected adversarial blocks | Artifacts |
 | --- | ---: | ---: | ---: | --- |
-| Live Groq, 40 attempts | 20 | 16 | 4 | [CSV](backend/eval/results/eval_results.csv), [boxplot](backend/eval/results/eval_boxplot.png), [heatmap](backend/eval/results/agent_heatmap.png) |
+| Live, previous LLM provider, 40 attempts | 20 | 16 | 4 | [CSV](backend/eval/results/eval_results.csv), [boxplot](backend/eval/results/eval_boxplot.png), [heatmap](backend/eval/results/agent_heatmap.png) |
 | Offline LLM fixtures, 40 attempts | 36 | 0 | 4 | [CSV](backend/eval/results_offline/eval_results.csv), [boxplot](backend/eval/results_offline/eval_boxplot.png) |
 
-Every live failure was a Groq rate-limit error; the batch reached both the account's 8,000-token-per-minute and 200,000-token-per-day limits. These failures are retained rather than replaced with fixture responses.
+These results predate the move to Gemini. Every live failure was a rate-limit error from the previous provider; the batch reached both the account's 8,000-token-per-minute and 200,000-token-per-day limits. These failures are retained rather than replaced with fixture responses.
 
 From the repository root:
 
@@ -167,6 +167,6 @@ npm run build
 npm run lint
 ```
 
-Tests use an isolated SQLite database, real framework runtimes and a fixture LLM. They cover all six mode combinations, original/new HTTP routes, MCP stdio interoperability, A2A envelopes/JSON-RPC, guardrails, failure callbacks, concurrent updates and session isolation. Live PostgreSQL/Groq/Jaeger checks are separate. Set `OTEL_TRACES_EXPORTER=none` to run without an OTLP collector; set `OTEL_EXPORTER_OTLP_ENDPOINT` and `JAEGER_UI_URL` to use another collector/viewer.
+Tests use an isolated SQLite database, real framework runtimes and a fixture LLM. They cover all six mode combinations, original/new HTTP routes, MCP stdio interoperability, A2A envelopes/JSON-RPC, guardrails, failure callbacks, concurrent updates and session isolation. Live PostgreSQL/Gemini/Jaeger checks are separate. Set `OTEL_TRACES_EXPORTER=none` to run without an OTLP collector; set `OTEL_EXPORTER_OTLP_ENDPOINT` and `JAEGER_UI_URL` to use another collector/viewer.
 
 Framework references: [ADK agents](https://google.github.io/adk-docs/agents/llm-agents/), [CrewAI custom model adapters](https://docs.crewai.com/en/learn/custom-llm), [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk).

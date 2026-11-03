@@ -33,6 +33,10 @@ backend/outputs/*/
 .pytest_cache/
 backend/eval/results_smoke/
 backend/eval/results_smoke_offline/
+backend/eval/results/
+backend/results_offline/
+backend/eval/validation.json
+backend/.env
 
 # Node
 frontend/node_modules/

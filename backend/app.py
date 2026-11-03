@@ -50,7 +50,7 @@ from observability import setup_tracing
 from platform_api import router as platform_router
 from runtime_context import execution_context
 from schemas import AgentInput
-from mcp_tools.mcp_groq import LLM_TIMEOUT_SECONDS, LLMRequestError
+from mcp_tools.mcp_llm import LLM_TIMEOUT_SECONDS, LLMRequestError
 
 # uvicorn only configures its own loggers; without this, INFO from app code is dropped.
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
