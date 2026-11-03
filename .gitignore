@@ -29,6 +29,10 @@ backend/outputs/.gitkeep
 
 # Keep outputs folder but ignore contents
 !backend/outputs/.gitkeep
+backend/outputs/*/
+.pytest_cache/
+backend/eval/results_smoke/
+backend/eval/results_smoke_offline/
 
 # Node
 frontend/node_modules/

@@ -2,7 +2,7 @@ import { motion } from 'framer-motion'
 import { ArrowUpRight, Code2, Database, Download, Package } from 'lucide-react'
 import { getDownloadUrl } from '../services/api'
 
-function DownloadPanel({ reportReady, modelReady }) {
+function DownloadPanel({ reportReady, modelReady, sessionId }) {
   const items = [
     {
       key: 'eda-code',
@@ -62,7 +62,7 @@ function DownloadPanel({ reportReady, modelReady }) {
 
   const handleDownload = (item, ready) => {
     if (!ready) return
-    window.open(getDownloadUrl(item), '_blank')
+    window.open(getDownloadUrl(item, sessionId), '_blank')
   }
 
   return (

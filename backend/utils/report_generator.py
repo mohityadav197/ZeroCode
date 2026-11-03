@@ -9,8 +9,9 @@
 import os
 from datetime import datetime
 
-from config import UPLOAD_FOLDER
+from runtime_context import output_root as UPLOAD_FOLDER
 from llm_provider import LLMProvider
+from legacy_contracts import report_contract
 
 REPORT_CSS = """
 * { box-sizing: border-box; }
@@ -426,6 +427,7 @@ class ReportGenerator:
         return filepath.replace("\\", "/")
 
     # ------------------------------------------------------------------
+    @report_contract
     def generate_full_report(self, analysis_result: dict, ml_result: dict) -> dict:
         verification = self.verify_data(analysis_result, ml_result)
         recommendations = self.generate_recommendations(analysis_result, ml_result)

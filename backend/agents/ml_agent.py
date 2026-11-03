@@ -67,12 +67,13 @@ except ImportError:
     CatBoostClassifier = None
     CatBoostRegressor = None
 
-from config import UPLOAD_FOLDER
+from runtime_context import output_root as UPLOAD_FOLDER, charts_root as CHARTS_FOLDER
 from llm_provider import LLMProvider
+from plotting import serialized_plot
+from legacy_contracts import ml_contract
 
 CLASSIFICATION_TYPES = ("binary_classification", "multiclass_classification")
 
-CHARTS_FOLDER = os.path.join(UPLOAD_FOLDER, "charts")
 
 SHAP_TREE_MODELS = {
     "Random Forest", "Random Forest Regressor",
@@ -1091,6 +1092,7 @@ predictions = model.predict(X_test)
         return filepath.replace("\\", "/")
 
     # ------------------------------------------------------------------
+    @serialized_plot
     def generate_shap_analysis(
         self, model, X_train, X_test, feature_names, problem_type, model_name
     ) -> dict:
@@ -1283,14 +1285,16 @@ predictions = model.predict(X_test)
         return names
 
     # ------------------------------------------------------------------
+    @ml_contract
     def run_full_ml_pipeline(
         self, df: pd.DataFrame, target_col: str, problem_type: str,
         extra_models: list = None, selected_metrics: list = None,
         user_preprocessing_choices: dict = None,
+        prepared_data: dict = None,
     ) -> dict:
         model_names_for_preprocessing = extra_models or self._peek_default_model_names(problem_type, len(df))
 
-        prep = self.preprocess(
+        prep = prepared_data if prepared_data is not None else self.preprocess(
             df, target_col, problem_type,
             user_choices=user_preprocessing_choices,
             selected_models=model_names_for_preprocessing,

@@ -61,7 +61,7 @@ function FileUpload({ onUploadSuccess }) {
       const data = await uploadFile(file)
       setResult(data)
       setStatus('success')
-      onUploadSuccess?.(file.name, data)
+      onUploadSuccess?.(data.filename, data)
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Upload failed')
       setStatus('error')

@@ -5,21 +5,21 @@ Wait until you see "Engine running"
 Step 2 — Start PostgreSQL
 
 cmd
-cd C:\Users\MOHIT\Desktop\ZeroCode
+cd C:\Users\MOHIT\OneDrive\Desktop\ZeroCode
 docker-compose up -d postgres
 
 Step 3 — Start Backend
 
 cmd
-cd C:\Users\MOHIT\Desktop\ZeroCode\backend
+cd C:\Users\MOHIT\OneDrive\Desktop\ZeroCode\backend
 conda activate venv
-uvicorn app:app --reload --port 8000
+uvicorn app:app --reload --reload-exclude "%CD%\outputs" --port 8000
 
 Step 4 — Start Frontend
 Open second CMD:
 
 cmd
-cd C:\Users\MOHIT\Desktop\ZeroCode\frontend
+cd C:\Users\MOHIT\OneDrive\Desktop\ZeroCode\frontend
 npm run dev
 
 Step 5 — Open Browser

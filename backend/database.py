@@ -11,6 +11,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.engine import make_url
 
 load_dotenv()
 
@@ -19,7 +20,10 @@ DATABASE_URL = os.getenv(
     "postgresql://zerocode:zerocode123@localhost:5433/zerocode_db",
 )
 
-engine = create_engine(DATABASE_URL)
+database_url = make_url(DATABASE_URL)
+if database_url.drivername in ("postgresql", "postgres"):
+    database_url = database_url.set(drivername="postgresql+psycopg2")
+engine = create_engine(database_url, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -112,4 +116,5 @@ class ChatMessage(Base):
 
 
 def init_db():
+    import platform_models  # Register the additive platform tables with Base.
     Base.metadata.create_all(bind=engine)

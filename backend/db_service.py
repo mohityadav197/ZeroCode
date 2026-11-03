@@ -178,6 +178,10 @@ def delete_session(db, session_id) -> bool:
     if session is None:
         return False
 
+    from platform_models import AgentLog, BlackboardRecord
+    db.query(AgentLog).filter(AgentLog.session_id == session_id).delete()
+    db.query(BlackboardRecord).filter(BlackboardRecord.session_id == session_id).delete()
+
     db.query(ChatMessage).filter(ChatMessage.session_id == session_id).delete()
     db.query(GeneratedFile).filter(GeneratedFile.session_id == session_id).delete()
     db.query(SHAPResult).filter(SHAPResult.session_id == session_id).delete()

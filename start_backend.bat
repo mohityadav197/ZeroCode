@@ -1,6 +1,6 @@
 @echo off
 echo Starting ZeroCode Backend...
-cd C:\Users\MOHIT\Desktop\ZeroCode\backend
-call conda activate venv
-uvicorn app:app --reload --port 8000
+cd /d "%~dp0backend"
+rem The exclude must be an absolute path: uvicorn ignores a relative directory here.
+"..\.venv\Scripts\python.exe" -m uvicorn app:app --reload --reload-exclude "%~dp0backend\outputs" --port 8000
 pause

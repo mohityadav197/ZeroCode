@@ -13,12 +13,13 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 
-from config import UPLOAD_FOLDER
+from runtime_context import output_root as UPLOAD_FOLDER, charts_root as CHARTS_FOLDER
 from llm_provider import LLMProvider
+from plotting import serialized_plot
+from legacy_contracts import analysis_contract
 
 MAX_BAR_CHART_CATEGORIES = 20
 
-CHARTS_FOLDER = os.path.join(UPLOAD_FOLDER, "charts")
 
 TARGET_KEYWORDS = [
     "target", "label", "output", "class", "result", "price", "salary",
@@ -666,6 +667,7 @@ class AnalysisAgent:
         }
 
     # ------------------------------------------------------------------
+    @serialized_plot
     def generate_charts(self, df: pd.DataFrame, profile: dict) -> dict:
         os.makedirs(CHARTS_FOLDER, exist_ok=True)
 
@@ -687,7 +689,9 @@ class AnalysisAgent:
             filepath = os.path.join(CHARTS_FOLDER, filename)
             try:
                 fig.write_image(filepath)
-                charts[key] = f"outputs/charts/{filename}"
+                from runtime_context import current_session
+                prefix = "" if current_session.get() == "legacy" else current_session.get() + "/"
+                charts[key] = f"outputs/{prefix}charts/{filename}"
             except Exception:
                 pass
 
@@ -945,6 +949,7 @@ print("\\nSummary statistics:\\n", df.describe(include="all"))
         return fallback[:3] if len(fallback) >= 3 else fallback
 
     # ------------------------------------------------------------------
+    @analysis_contract
     def run_full_analysis(self, df: pd.DataFrame, confirmed_target: str = None) -> dict:
         profile = self.profile_data(df)
         domain_info = self.detect_domain(df, profile)

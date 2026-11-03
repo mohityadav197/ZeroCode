@@ -1,6 +1,8 @@
 import axios from 'axios'
 
 const BASE_URL = 'http://localhost:8000'
+export const CHAT_TIMEOUT_MS = 60_000
+const CONTEXT_TIMEOUT_MS = 10_000
 
 const api = axios.create({
   baseURL: BASE_URL,
@@ -61,17 +63,29 @@ export const generateReport = async (filename, targetCol, problemType, sessionId
     target_col: targetCol,
     problem_type: problemType,
     session_id: sessionId,
+  }, { timeout: 120_000 })
+  return res.data
+}
+
+export const sendChat = async (message, sessionId = null, signal) => {
+  const res = await api.post('/chat', { message, session_id: sessionId }, {
+    timeout: CHAT_TIMEOUT_MS,
+    signal,
   })
   return res.data
 }
 
-export const sendChat = async (message, sessionId = null) => {
-  const res = await api.post('/chat', { message, session_id: sessionId })
-  return res.data
+export const getApiErrorMessage = (error, fallback) => {
+  const message = error.response?.data?.message
+  if (typeof message === 'string') return message
+  const detail = error.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).filter(Boolean).join('; ') || fallback
+  return error.message || fallback
 }
 
 export const updateContext = async (key, value) => {
-  const res = await api.post('/context/update', { key, value })
+  const res = await api.post('/context/update', { key, value }, { timeout: CONTEXT_TIMEOUT_MS })
   return res.data
 }
 
@@ -95,6 +109,6 @@ export const deleteSession = async (sessionId) => {
   return res.data
 }
 
-export const getDownloadUrl = (item) => `${BASE_URL}/download/${item}`
+export const getDownloadUrl = (item, sessionId = null) => `${BASE_URL}/download/${item}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`
 
 export default api

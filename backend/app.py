@@ -5,14 +5,21 @@
 # ============================================
 
 import os
+import io
+import asyncio
+import logging
+import time
+import traceback
 from typing import Any, List, Optional
 
 import pandas as pd
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
+from openai import APIError, RateLimitError
 
 from agents.analysis_agent import AnalysisAgent
 from agents.ml_agent import MLAgent
@@ -36,8 +43,21 @@ from db_service import (
     update_session_status,
 )
 from utils.report_generator import ReportGenerator
+import api_service
+from blackboard import Blackboard
+from guardrails import GuardrailViolation, InputGuard
+from observability import setup_tracing
+from platform_api import router as platform_router
+from runtime_context import execution_context
+from schemas import AgentInput
+from mcp_tools.mcp_groq import LLM_TIMEOUT_SECONDS, LLMRequestError
 
+# uvicorn only configures its own loggers; without this, INFO from app code is dropped.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 app = FastAPI(title="ZeroCode API")
+app.include_router(platform_router)
+setup_tracing(app)
 analysis_agent = AnalysisAgent()
 ml_agent = MLAgent()
 report_generator = ReportGenerator()
@@ -54,9 +74,44 @@ app.add_middleware(
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 
+@app.exception_handler(GuardrailViolation)
+async def guardrail_error(request, error):
+    return JSONResponse(status_code=400, content={"detail": str(error), "guardrail": "blocked"})
+
+
+@app.exception_handler(ValueError)
+async def invalid_input(request, error):
+    return JSONResponse(status_code=422, content={"detail": str(error)})
+
+
+@app.exception_handler(RuntimeError)
+async def pipeline_error(request, error):
+    code = 409 if "already running" in str(error) else 500
+    return JSONResponse(status_code=code, content={"detail": str(error)})
+
+
+@app.exception_handler(RateLimitError)
+async def llm_rate_limit(request, error):
+    retry_after = error.response.headers.get("retry-after", "60")
+    return JSONResponse(status_code=429, headers={"Retry-After": retry_after},
+                        content={"detail": "Gemini rate limit reached. Retry in a moment.",
+                                 "retry_after": retry_after})
+
+
+@app.exception_handler(APIError)
+async def llm_provider_error(request, error):
+    return JSONResponse(status_code=502, content={"detail": "Gemini service error. Retrying failed."})
+
+
 @app.on_event("startup")
 def startup():
     init_db()
+
+
+def error_response(message):
+    # Returned from inside the route: an unhandled exception would skip CORSMiddleware,
+    # and the browser would hide the body behind a generic "Network Error".
+    return JSONResponse(status_code=500, content={"error": True, "message": message})
 
 
 def clean_for_json(obj):
@@ -76,6 +131,9 @@ def health_check():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), db: DBSession = Depends(get_db)):
+    if not file.filename or os.path.basename(file.filename) != file.filename or "/" in file.filename or "\\" in file.filename:
+        raise HTTPException(400, "Use a plain CSV filename")
+    InputGuard().validate_user_text(file.filename)
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -83,30 +141,37 @@ async def upload_file(file: UploadFile = File(...), db: DBSession = Depends(get_
             detail=f"Invalid file type '{ext}'. Only {ALLOWED_EXTENSIONS} files are allowed.",
         )
 
-    contents = await file.read()
+    contents = await file.read(MAX_FILE_SIZE_BYTES + 1)
     if len(contents) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=400,
             detail=f"File too large. Maximum allowed size is {MAX_FILE_SIZE_MB}MB.",
         )
 
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    filepath = os.path.join(UPLOAD_FOLDER, file.filename)
-    with open(filepath, "wb") as f:
-        f.write(contents)
-
     try:
-        df = pd.read_csv(filepath)
+        df = pd.read_csv(io.BytesIO(contents))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to read CSV file: {e}")
 
+    validation = InputGuard().validate_csv_schema(df)
+    if not validation.valid:
+        raise HTTPException(400, detail="; ".join(validation.errors))
     session = create_session(db, file.filename, len(df), len(df.columns))
+    stored_filename = f"{session.session_id}/{file.filename}"
+    session.filename = stored_filename
+    db.commit()
+    filepath = os.path.join(UPLOAD_FOLDER, stored_filename)
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "wb") as output:
+        output.write(contents)
+    Blackboard(session.session_id, AgentInput(session_id=session.session_id, filepath=filepath))
     orchestrator.update_context("session_id", session.session_id)
 
     return clean_for_json({
         "success": True,
         "session_id": session.session_id,
-        "filename": file.filename,
+        "filename": stored_filename,
+        "original_filename": file.filename,
         "rows": len(df),
         "columns": len(df.columns),
         "column_names": df.columns.tolist(),
@@ -116,7 +181,7 @@ async def upload_file(file: UploadFile = File(...), db: DBSession = Depends(get_
 
 @app.get("/files/{filename:path}")
 def get_file(filename: str):
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    filepath = api_service.dataset_path(filename.removeprefix("outputs/"))
     if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
     return FileResponse(filepath)
@@ -130,44 +195,55 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/analyze")
 def analyze_file(payload: AnalyzeRequest, db: DBSession = Depends(get_db)):
-    filepath = os.path.join(UPLOAD_FOLDER, payload.filename)
-    if not os.path.isfile(filepath):
-        raise HTTPException(status_code=404, detail=f"File '{payload.filename}' not found.")
-
     try:
-        df = pd.read_csv(filepath)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to read CSV file: {e}")
+        filepath = api_service.dataset_path(payload.filename)
+        orchestrator = api_service.session_orchestrator(payload.session_id, db)
+        if not os.path.isfile(filepath):
+            raise HTTPException(status_code=404, detail=f"File '{payload.filename}' not found.")
 
-    result = analysis_agent.run_full_analysis(df, confirmed_target=payload.confirmed_target)
+        try:
+            df = pd.read_csv(filepath)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to read CSV file: {e}")
 
-    problem_type_str = (result.get("problem_type", {}) or {}).get("problem_type")
-    profile = result.get("profile", {}) or {}
-    model_recs = ml_agent.generate_model_recommendations(df, problem_type_str, profile, result)
-    result["model_recommendations"] = model_recs
+        result = api_service.analyze(payload.filename, payload.confirmed_target, payload.session_id)
 
-    orchestrator.update_context("filename", payload.filename)
-    orchestrator.update_context("analysis_result", result)
-    orchestrator.update_context("insights", result.get("insights", []))
-    orchestrator.update_context(
-        "charts_generated",
-        list((result.get("charts", {}) or {}).get("charts", {}).keys()),
-    )
-    orchestrator.update_context("outliers", (result.get("outliers", {}) or {}).get("outliers", {}))
-    orchestrator.update_context("target_balance", result.get("target_balance", {}))
-    orchestrator.update_context("missing_values", (result.get("profile", {}) or {}).get("missing", {}))
-    orchestrator.update_context("quality_score", (result.get("profile", {}) or {}).get("quality_score", 0))
-    orchestrator.update_context("model_recommendations", model_recs)
-    orchestrator.update_context("domain_info", result.get("domain_info"))
+        problem_type_str = (result.get("problem_type", {}) or {}).get("problem_type")
+        profile = result.get("profile", {}) or {}
+        run_session = api_service.make_request(payload.filename, payload.session_id).session_id
+        with execution_context(run_session):
+            model_recs = ml_agent.generate_model_recommendations(df, problem_type_str, profile, result)
+        result["model_recommendations"] = model_recs
+        orchestrator.update_context("pipeline_session_id", run_session)
 
-    if payload.session_id:
-        save_analysis_result(db, payload.session_id, result)
-        update_session_status(db, payload.session_id, "analyzed")
-        chart_paths = (result.get("charts") or {}).get("charts") or {}
-        for chart_type, chart_path in chart_paths.items():
-            save_file_record(db, payload.session_id, f"chart_{chart_type}", chart_path)
+        orchestrator.update_context("filename", payload.filename)
+        orchestrator.update_context("analysis_result", result)
+        orchestrator.update_context("insights", result.get("insights", []))
+        orchestrator.update_context(
+            "charts_generated",
+            list((result.get("charts", {}) or {}).get("charts", {}).keys()),
+        )
+        orchestrator.update_context("outliers", (result.get("outliers", {}) or {}).get("outliers", {}))
+        orchestrator.update_context("target_balance", result.get("target_balance", {}))
+        orchestrator.update_context("missing_values", (result.get("profile", {}) or {}).get("missing", {}))
+        orchestrator.update_context("quality_score", (result.get("profile", {}) or {}).get("quality_score", 0))
+        orchestrator.update_context("model_recommendations", model_recs)
+        orchestrator.update_context("domain_info", result.get("domain_info"))
 
-    return clean_for_json(result)
+        if payload.session_id:
+            save_analysis_result(db, payload.session_id, result)
+            update_session_status(db, payload.session_id, "analyzed")
+            chart_paths = (result.get("charts") or {}).get("charts") or {}
+            for chart_type, chart_path in chart_paths.items():
+                save_file_record(db, payload.session_id, f"chart_{chart_type}", chart_path)
+
+        return clean_for_json(result)
+    except HTTPException:
+        raise
+    except Exception:
+        # The exception handlers above answer without logging, which hides the traceback.
+        traceback.print_exc()
+        raise
 
 
 class PreprocessingRecommendationsRequest(BaseModel):
@@ -178,7 +254,7 @@ class PreprocessingRecommendationsRequest(BaseModel):
 
 @app.post("/preprocessing-recommendations")
 def preprocessing_recommendations(payload: PreprocessingRecommendationsRequest):
-    filepath = os.path.join(UPLOAD_FOLDER, payload.filename)
+    filepath = api_service.dataset_path(payload.filename)
     if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail=f"File '{payload.filename}' not found.")
 
@@ -212,7 +288,8 @@ class TrainRequest(BaseModel):
 
 @app.post("/train")
 def train_file(payload: TrainRequest, db: DBSession = Depends(get_db)):
-    filepath = os.path.join(UPLOAD_FOLDER, payload.filename)
+    filepath = api_service.dataset_path(payload.filename)
+    orchestrator = api_service.session_orchestrator(payload.session_id, db)
     if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail=f"File '{payload.filename}' not found.")
 
@@ -224,14 +301,16 @@ def train_file(payload: TrainRequest, db: DBSession = Depends(get_db)):
     if payload.target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{payload.target_col}' not found in dataset.")
 
-    result = ml_agent.run_full_ml_pipeline(
-        df,
+    result = api_service.train(
+        payload.filename,
         target_col=payload.target_col,
         problem_type=payload.problem_type,
         extra_models=payload.extra_models,
         selected_metrics=payload.selected_metrics,
         user_preprocessing_choices=payload.user_preprocessing_choices,
+        session_id=payload.session_id,
     )
+    orchestrator.update_context("pipeline_session_id", api_service.make_request(payload.filename, payload.session_id).session_id)
 
     orchestrator.update_context("ml_result", result)
     orchestrator.update_context("target_col", payload.target_col)
@@ -279,7 +358,8 @@ class ReportRequest(BaseModel):
 
 @app.post("/report")
 def report_file(payload: ReportRequest, db: DBSession = Depends(get_db)):
-    filepath = os.path.join(UPLOAD_FOLDER, payload.filename)
+    logger.info("Report request received: %s", payload.model_dump())
+    filepath = api_service.dataset_path(payload.filename)
     if not os.path.isfile(filepath):
         raise HTTPException(status_code=404, detail=f"File '{payload.filename}' not found.")
 
@@ -291,15 +371,27 @@ def report_file(payload: ReportRequest, db: DBSession = Depends(get_db)):
     if payload.target_col not in df.columns:
         raise HTTPException(status_code=400, detail=f"Target column '{payload.target_col}' not found in dataset.")
 
-    analysis_result = analysis_agent.run_full_analysis(df, confirmed_target=payload.target_col)
-    ml_result = ml_agent.run_full_ml_pipeline(
-        df, target_col=payload.target_col, problem_type=payload.problem_type
-    )
-    result = report_generator.generate_full_report(analysis_result, ml_result)
+    try:
+        logger.info("Generating report...")
+        started = time.perf_counter()
+        result = api_service.report(payload.filename, payload.target_col, payload.problem_type, payload.session_id)
+        logger.info("Report generated in %.2fs", time.perf_counter() - started)
+        if not result or not result.get("report_path") or not os.path.isfile(result["report_path"]):
+            raise RuntimeError("Report generation did not produce a report file")
+        orchestrator.update_context("pipeline_session_id", api_service.make_request(payload.filename, payload.session_id).session_id)
 
-    if payload.session_id:
-        save_file_record(db, payload.session_id, "report", result.get("report_path"))
-        update_session_status(db, payload.session_id, "completed")
+        if payload.session_id:
+            save_file_record(db, payload.session_id, "report", result["report_path"])
+            update_session_status(db, payload.session_id, "completed")
+    except HTTPException:
+        raise
+    except Exception as error:
+        if "already running" in str(error):
+            # Leave this to pipeline_error, which answers 409: the session is busy, not broken.
+            logger.warning("Report rejected for session %s: %s", payload.session_id, error)
+            raise
+        logger.exception("Report failed")
+        return error_response(f"Report generation failed: {error}")
 
     return clean_for_json(result)
 
@@ -315,12 +407,21 @@ DOWNLOAD_FILES = {
 
 
 @app.get("/download/{item}")
-def download_item(item: str):
+def download_item(item: str, session_id: Optional[str] = None):
     if item not in DOWNLOAD_FILES:
         raise HTTPException(status_code=404, detail=f"Unknown download item '{item}'.")
 
     filename, media_type = DOWNLOAD_FILES[item]
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    session_id = session_id or orchestrator.session_context.get("pipeline_session_id")
+    if session_id:
+        AgentInput(session_id=session_id)
+        filepath = os.path.join(UPLOAD_FOLDER, session_id, filename)
+    else:
+        # Keep the existing download URL working for single-session clients.
+        from database import Session as SavedSession, SessionLocal
+        with SessionLocal() as download_db:
+            latest = download_db.query(SavedSession).order_by(SavedSession.created_at.desc()).first()
+            filepath = os.path.join(UPLOAD_FOLDER, latest.session_id, filename) if latest else os.path.join(UPLOAD_FOLDER, filename)
 
     if not os.path.isfile(filepath):
         raise HTTPException(
@@ -336,12 +437,12 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
 
 
-@app.post("/chat")
-def chat(payload: ChatRequest, db: DBSession = Depends(get_db)):
-    print("Session ID in chat:", payload.session_id)
+def _load_chat_orchestrator(session_id, db):
+    orchestrator = api_service.session_orchestrator(session_id, db)
+    print("Session ID in chat:", session_id)
 
-    if payload.session_id:
-        history = get_chat_history(db, payload.session_id)
+    if session_id:
+        history = get_chat_history(db, session_id)
         orchestrator.session_context["chat_history"] = [
             {"role": m.role, "content": m.message} for m in history
         ]
@@ -351,14 +452,43 @@ def chat(payload: ChatRequest, db: DBSession = Depends(get_db)):
     leaderboard_line = f"leaderboard: {orchestrator.session_context.get('leaderboard')}"
     print(best_model_line.encode("ascii", errors="replace").decode("ascii"))
     print(leaderboard_line.encode("ascii", errors="replace").decode("ascii"))
+    return orchestrator
 
-    response = orchestrator.chat(payload.message)
 
+def _save_chat_exchange(session_id, message, response, db):
+    if session_id:
+        save_chat_message(db, session_id, "user", message)
+        save_chat_message(db, session_id, "assistant", response)
+
+
+@app.post("/chat")
+async def chat(payload: ChatRequest, db: DBSession = Depends(get_db)):
+    logger.info("Chat request received: %s", payload.model_dump())
+    validation = InputGuard().validate_user_text(payload.message)
     if payload.session_id:
-        save_chat_message(db, payload.session_id, "user", payload.message)
-        save_chat_message(db, payload.session_id, "assistant", response)
+        AgentInput(session_id=payload.session_id)
 
-    return {"response": response}
+    try:
+        # These helpers do blocking database work, which must stay off the event loop.
+        orchestrator = await asyncio.to_thread(_load_chat_orchestrator, payload.session_id, db)
+        logger.info("Calling LLM...")
+        started = time.perf_counter()
+        with execution_context(payload.session_id or "legacy"):
+            response = await asyncio.wait_for(
+                asyncio.to_thread(orchestrator.chat, payload.message), timeout=LLM_TIMEOUT_SECONDS,
+            )
+        logger.info("LLM responded in %.2fs", time.perf_counter() - started)
+        if not isinstance(response, str) or not response.strip():
+            raise LLMRequestError("Chat returned an empty response")
+        await asyncio.to_thread(_save_chat_exchange, payload.session_id, payload.message, response, db)
+    except TimeoutError:
+        logger.exception("Chat failed")
+        return error_response(f"The LLM did not respond within {LLM_TIMEOUT_SECONDS} seconds")
+    except Exception as error:
+        logger.exception("Chat failed")
+        return error_response(str(error) or type(error).__name__)
+
+    return {"response": response, "warnings": validation.warnings}
 
 
 class ContextUpdateRequest(BaseModel):
@@ -456,8 +586,7 @@ def get_session_download_files(session_id: str, db: DBSession = Depends(get_db))
     return clean_for_json([{"file_type": f.file_type, "file_path": f.file_path} for f in files])
 
 
-@app.delete("/sessions/{session_id}")
-def delete_session_route(session_id: str, db: DBSession = Depends(get_db)):
+def _delete_session_data(session_id: str, db: DBSession):
     # outputs/ is a single shared folder reused by every session (each new
     # /train or /analyze run overwrites the same filenames), so a file path
     # recorded for this session may still be "owned" by another session's
@@ -490,7 +619,14 @@ def delete_session_route(session_id: str, db: DBSession = Depends(get_db)):
     return {"status": "deleted", "session_id": session_id}
 
 
+@app.delete("/sessions/{session_id}")
+def delete_session_route(session_id: str, db: DBSession = Depends(get_db)):
+    from session_locks import session_lock
+    with session_lock(session_id):
+        return _delete_session_data(session_id, db)
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True, reload_excludes=[os.path.abspath(UPLOAD_FOLDER)])

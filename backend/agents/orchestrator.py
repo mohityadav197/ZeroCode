@@ -6,6 +6,7 @@
 # ============================================
 
 from llm_provider import LLMProvider
+from config import MESSAGING_MODE, PIPELINE_MODE
 
 RECOMMENDATION_KEYWORDS = ["improve", "recommend", "suggest", "next", "what should"]
 
@@ -58,8 +59,12 @@ def _describe_chart(name: str) -> str:
     return f"{name} is a chart generated during analysis"
 
 
-class Orchestrator:
-    def __init__(self):
+from pipeline import PipelineOrchestrator
+
+
+class Orchestrator(PipelineOrchestrator):
+    def __init__(self, pipeline_mode=PIPELINE_MODE, messaging_mode=MESSAGING_MODE):
+        super().__init__(pipeline_mode, messaging_mode)
         self.llm = LLMProvider()
         self.session_context = {
             "filename": None,

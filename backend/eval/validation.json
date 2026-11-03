@@ -1,0 +1,44 @@
+{
+  "verified_at": "2026-11-02T02:20:15.871422+05:30",
+  "python": "3.11.9",
+  "packages": {
+    "crewai": "1.6.1",
+    "google-adk": "1.39.1",
+    "mcp": "1.30.0",
+    "pydantic": "2.14.2",
+    "fastapi": "0.141.1",
+    "sqlalchemy": "2.1.6",
+    "opentelemetry-sdk": "1.41.1"
+  },
+  "backend_tests_passed": 23,
+  "frontend_build": "passed",
+  "frontend_lint": "passed with existing warnings",
+  "personas_offline": {
+    "A": "allowed",
+    "B": "warned",
+    "C": "blocked"
+  },
+  "mcp_stdio_discovery_and_query": "passed",
+  "postgresql_metadata_query": "passed",
+  "jaeger_verified_tool_trace": "http://localhost:16686/trace/f85ceb25b830b674b771d68aabf9be5e",
+  "jaeger_verified_shape": "891x12",
+  "live_evaluation": {
+    "runs": 40,
+    "outcomes": {
+      "completed": 20,
+      "failed": 16,
+      "blocked": 4
+    },
+    "tokens_used": 195774,
+    "estimated_cost_usd": 0.009788700000000001,
+    "all_failures_are_provider_quota_errors": true
+  },
+  "offline_evaluation": {
+    "runs": 40,
+    "outcomes": {
+      "completed": 36,
+      "blocked": 4
+    },
+    "all_expected_outcomes_passed": true
+  }
+}

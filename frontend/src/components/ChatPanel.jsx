@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { MessageCircle, Send, User } from 'lucide-react'
-import { sendChat } from '../services/api'
+import { CHAT_TIMEOUT_MS, getApiErrorMessage, sendChat } from '../services/api'
 
 function formatTime(date) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -20,8 +20,12 @@ function ChatPanel({ analysisResult, mlResult, sessionId, initialMessages }) {
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const endRef = useRef(null)
+  const requestRef = useRef(null)
 
   useEffect(() => {
+    requestRef.current?.abort()
+    requestRef.current = null
+    setLoading(false)
     setMessages(
       initialMessages?.length
         ? initialMessages.map((m) => ({
@@ -31,6 +35,10 @@ function ChatPanel({ analysisResult, mlResult, sessionId, initialMessages }) {
           }))
         : []
     )
+    return () => {
+      requestRef.current?.abort()
+      requestRef.current = null
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
@@ -42,22 +50,50 @@ function ChatPanel({ analysisResult, mlResult, sessionId, initialMessages }) {
 
   const handleSend = async () => {
     const text = input.trim()
-    if (!text || loading) return
+    if (!text || loading || requestRef.current || !canChat) return
+
+    const controller = new AbortController()
+    requestRef.current = controller
+    let timeoutId
 
     setMessages((prev) => [...prev, { role: 'user', content: text, time: new Date() }])
     setInput('')
     setLoading(true)
 
     try {
-      const data = await sendChat(text, sessionId)
+      const deadline = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          const error = new Error('Request timed out. Please try again.')
+          error.code = 'ECONNABORTED'
+          reject(error)
+          controller.abort()
+        }, CHAT_TIMEOUT_MS)
+      })
+      const data = await Promise.race([sendChat(text, sessionId, controller.signal), deadline])
+      if (requestRef.current !== controller) return
+      if (typeof data.response !== 'string' || !data.response.trim()) {
+        throw new Error('The assistant returned an empty response. Please try again.')
+      }
+      for (const warning of data.warnings || []) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: warning, time: new Date() }])
+      }
       setMessages((prev) => [...prev, { role: 'assistant', content: data.response, time: new Date() }])
-    } catch {
+    } catch (error) {
+      if (requestRef.current !== controller) return
+      console.error('ZeroCode chat request failed:', error)
+      const message = ['ECONNABORTED', 'ETIMEDOUT'].includes(error.code)
+        ? 'Request timed out. Please try again.'
+        : getApiErrorMessage(error, 'Could not reach ZeroCode AI. Please try again.')
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: 'Sorry, something went wrong reaching ZeroCode AI.', time: new Date() },
+        { role: 'assistant', content: message, time: new Date() },
       ])
     } finally {
-      setLoading(false)
+      clearTimeout(timeoutId)
+      if (requestRef.current === controller) {
+        requestRef.current = null
+        setLoading(false)
+      }
     }
   }
 

@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowRight, Clock, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { ArrowRight, Clock, Loader2, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import FileUpload from '../components/FileUpload'
 import DataPreview from '../components/DataPreview'
 import PipelineTracker from '../components/PipelineTracker'
@@ -11,6 +11,7 @@ import ModelRecommendations from '../components/ModelRecommendations'
 import PreprocessingPanel from '../components/PreprocessingPanel'
 import MetricsSelector from '../components/MetricsSelector'
 import DownloadPanel from '../components/DownloadPanel'
+import AgentMonitoring from '../components/AgentMonitoring'
 import ChartDisplay from '../components/ChartDisplay'
 import ChatPanel from '../components/ChatPanel'
 import VisualChecklist from '../components/VisualChecklist'
@@ -19,6 +20,7 @@ import {
   analyzeData,
   deleteSession,
   generateReport,
+  getApiErrorMessage,
   getPreprocessingRecommendations,
   getSession,
   getSessions,
@@ -194,6 +196,8 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
   const [analysisResult, setAnalysisResult] = useState(null)
   const [mlResult, setMlResult] = useState(null)
   const [reportResult, setReportResult] = useState(null)
+  const [reportLoading, setReportLoading] = useState(false)
+  const [reportError, setReportError] = useState('')
   const [pipelineSteps, setPipelineSteps] = useState(INITIAL_STEPS)
   const [selectedExtraModels, setSelectedExtraModels] = useState([])
   const [selectedMetrics, setSelectedMetrics] = useState([])
@@ -250,6 +254,13 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
     setPipelineSteps((prev) => prev.map((s, i) => (i === index ? { ...s, status } : s)))
   }
 
+  // The results are already on screen, so a slow or failed sync must not hold
+  // loadingMessage (which disables Generate Report) or report the step as failed.
+  const syncContext = (entries) => {
+    Promise.all(Object.entries(entries).map(([key, value]) => updateContext(key, value)))
+      .catch((err) => console.warn('ZeroCode context sync failed:', err))
+  }
+
   const handleUploadSuccess = (filename, data) => {
     setUploadedFile(filename)
     setUploadInfo(data)
@@ -271,8 +282,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
       setAnalysisResult(result)
       onDomainChange?.(result.domain_info ?? null)
       updateStep(1, 'done')
-      await updateContext('filename', uploadedFile)
-      await updateContext('analysis_result', result)
+      syncContext({ filename: uploadedFile, analysis_result: result })
       const insightCount = result.insights?.length ?? 0
       toast.success(`Analysis complete! ${insightCount} insights found.`)
     } catch (err) {
@@ -333,9 +343,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
       console.log('Train result:', result)
       setMlResult(result)
       updateStep(2, 'done')
-      await updateContext('ml_result', result)
-      await updateContext('target_col', targetCol)
-      await updateContext('problem_type', problemType)
+      syncContext({ ml_result: result, target_col: targetCol, problem_type: problemType })
 
       const bestEntry = result.leaderboard?.find((r) => r.is_best) || result.leaderboard?.[0]
       const metric = bestEntry?.accuracy ?? bestEntry?.r2
@@ -352,24 +360,35 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
   }
 
   const handleGenerateReport = async () => {
-    if (!uploadedFile || !analysisResult) return
+    if (reportLoading) return
+    if (!uploadedFile || !analysisResult || !mlResult || mlResult.status === 'failed') {
+      setReportError('Please train a model before generating a report')
+      return
+    }
     const targetCol = analysisResult.target_suggestion?.suggested_target
     const problemType = analysisResult.problem_type?.problem_type
     setErrorMessage('')
+    setReportError('')
+    setReportLoading(true)
     updateStep(3, 'running')
     setLoadingMessage('Generating report...')
     try {
       const result = await generateReport(uploadedFile, targetCol, problemType, sessionId)
+      if (!result?.report_path) throw new Error('Report generation did not return a download. Please try again.')
       setReportResult(result)
       updateStep(3, 'done')
       toast.success('Report ready to download!')
       refreshSessions()
     } catch (err) {
       updateStep(3, 'error')
-      const msg = err.response?.data?.detail || err.message || 'Report generation failed'
-      setErrorMessage(msg)
+      console.error('ZeroCode report generation failed:', err)
+      const msg = ['ECONNABORTED', 'ETIMEDOUT'].includes(err.code)
+        ? 'Report generation timed out. Please try again.'
+        : getApiErrorMessage(err, 'Report generation failed')
+      setReportError(msg)
       toast.error(msg)
     } finally {
+      setReportLoading(false)
       setLoadingMessage('')
     }
   }
@@ -393,6 +412,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
       setChatHistory(data.chat_history || [])
       setChecklistOpen(false)
       setErrorMessage('')
+      setReportError('')
 
       const doneUpTo = STATUS_STEP_INDEX[session.status] ?? 0
       setPipelineSteps(INITIAL_STEPS.map((s, i) => ({ ...s, status: i <= doneUpTo ? 'done' : 'waiting' })))
@@ -425,6 +445,8 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
     setAnalysisResult(null)
     setMlResult(null)
     setReportResult(null)
+    setReportLoading(false)
+    setReportError('')
     setSelectedExtraModels([])
     setSelectedMetrics([])
     setModelsConfirmed(false)
@@ -464,6 +486,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
         )}
 
         <PipelineTracker steps={pipelineSteps} onRetry={handleRetry} onStepClick={handleStepClick} />
+        <AgentMonitoring key={sessionId} sessionId={sessionId} />
 
         {!uploadInfo && !analysisResult && (
           <RecentSessions
@@ -562,12 +585,20 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
             {!reportResult && (
               <button
                 onClick={handleGenerateReport}
-                disabled={loadingMessage !== ''}
-                className="gradient-btn"
+                disabled={reportLoading || loadingMessage !== ''}
+                aria-busy={reportLoading}
+                className="gradient-btn flex items-center gap-2"
               >
-                Generate Report
+                {reportLoading && <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />}
+                {reportLoading ? 'Generating report...' : 'Generate Report'}
               </button>
             )}
+          </div>
+        )}
+
+        {reportError && (
+          <div role="alert" className="text-sm text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+            {reportError}
           </div>
         )}
 
@@ -576,7 +607,7 @@ const Dashboard = forwardRef(function Dashboard({ onDatasetChange, onDomainChang
             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 text-sm text-emerald-300">
               Report generated successfully — {reportResult.verification?.stamp}
             </div>
-            <DownloadPanel reportReady={Boolean(reportResult)} modelReady={Boolean(mlResult)} />
+            <DownloadPanel reportReady={Boolean(reportResult)} modelReady={Boolean(mlResult)} sessionId={sessionId} />
           </motion.div>
         )}
       </div>
