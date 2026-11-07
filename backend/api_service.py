@@ -111,7 +111,7 @@ def session_orchestrator(session_id, db=None):
         from app import orchestrator
         return orchestrator
     agent = Orchestrator()
-    board = Blackboard(session_id).get_full_state()
+    board = Blackboard(session_id).get_fields("request", "eda_result", "ml_result")
     request = board["request"]
     analysis_context = board["eda_result"] or {}
     for key, value in {"filename": Path(request["filepath"]).name if request.get("filepath") else None,

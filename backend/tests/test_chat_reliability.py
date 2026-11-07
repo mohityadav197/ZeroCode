@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from openai import OpenAI
 
 import app as app_module
+from agents.orchestrator import Orchestrator
 from mcp_tools import mcp_llm
 
 
@@ -20,7 +21,7 @@ def llm_transport(monkeypatch):
     def install(handler):
         def create_client(**options):
             assert options["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai/"
-            assert options["timeout"] == 30
+            assert options["timeout"] == 90
             assert options["max_retries"] == 0
 
             def respond(request):
@@ -105,3 +106,19 @@ def test_chat_unexpected_failure_reaches_the_browser(monkeypatch):
     assert response.status_code == 500
     assert response.json()["error"] is True and "boom" in response.json()["message"]
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_chat_context_includes_all_available_results_regardless_of_the_question():
+    agent = Orchestrator()
+    assert agent.build_context_prompt() == "No analysis has been run yet."
+
+    agent.update_context("analysis_result", {"profile": {"rows": 891, "missing": {"Age": 19.87}}, "insights": ["Fare is skewed"]})
+    context = agent.build_context_prompt()
+    assert "Rows: 891" in context and "Fare is skewed" in context and "Age: 19.87% missing" in context
+    assert "No models have been trained yet." in context
+
+    agent.update_context("ml_result", {"best_model_name": "XGBoost", "leaderboard": [{"rank": 1, "accuracy": 0.81}]})
+    context = agent.build_context_prompt()
+    assert "Best model: XGBoost" in context and "Rows: 891" in context
+    assert "No models have been trained yet." not in context
+    assert "No analysis has been run yet." not in context

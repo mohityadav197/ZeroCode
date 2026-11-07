@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 const BASE_URL = 'http://localhost:8000'
-export const CHAT_TIMEOUT_MS = 60_000
+export const CHAT_TIMEOUT_MS = 90_000
 const CONTEXT_TIMEOUT_MS = 10_000
 
 const api = axios.create({

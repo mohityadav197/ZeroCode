@@ -8,7 +8,7 @@ from runtime_context import current_session
 
 logger = logging.getLogger(__name__)
 
-LLM_TIMEOUT_SECONDS = 30
+LLM_TIMEOUT_SECONDS = 90
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2

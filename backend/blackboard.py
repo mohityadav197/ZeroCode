@@ -79,6 +79,12 @@ class Blackboard:
             raise ValueError(f"Unknown stage: {stage}")
         return self.get_full_state()[f"{stage}_result"]
 
+    def get_fields(self, *fields):
+        with SessionLocal() as db:
+            values = (db.query(*(BlackboardRecord.state[field] for field in fields))
+                      .filter(BlackboardRecord.session_id == self.session_id).one())
+            return dict(zip(fields, values))
+
     def get_full_state(self):
         with SessionLocal() as db:
             row = db.get(BlackboardRecord, self.session_id)

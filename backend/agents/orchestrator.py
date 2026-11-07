@@ -1,47 +1,17 @@
 # ============================================
 # ZeroCode — orchestrator.py
 # Orchestrator — receives user chat messages,
-# understands intent, routes to correct context,
+# builds context from the session's results,
 # and returns intelligent answers using LLM.
 # ============================================
 
 from llm_provider import LLMProvider
 from config import MESSAGING_MODE, PIPELINE_MODE
 
-RECOMMENDATION_KEYWORDS = ["improve", "recommend", "suggest", "next", "what should"]
-
-INTENT_KEYWORDS = {
-    "data_question": ["rows", "columns", "shape", "size"],
-    "eda_question": ["insight", "insights", "finding", "findings"],
-    "model_question": [
-        "model", "accuracy", "f1", "train", "svm", "forest", "predict",
-        "xgboost", "logistic regression", "decision tree", "knn", "adaboost",
-        "naive bayes", "lightgbm", "catboost", "extra trees",
-        "linear regression", "elasticnet", "ridge", "lasso",
-        "win", "best model", "leaderboard", "compare",
-    ],
-    "preprocessing_question": ["preprocess", "clean", "encode", "drop"],
-    "chart_question": [
-        "chart", "histogram", "heatmap", "boxplot", "distribution",
-        "correlation", "bar chart", "visualisation", "visualization",
-        "plot", "graph", "show me",
-    ],
-    "shap_question": [
-        # NOTE: a bare "why did" used to live here and swallowed any
-        # "why did <model name> win/do well" question — those have no
-        # other shap-ish word, so they'd win on a single generic match
-        # even though they're really asking about the leaderboard, not
-        # per-sample feature attribution. Narrowed to phrasings that
-        # actually ask about a *prediction*, which model_question's own
-        # "model"/"predict" keywords don't cleanly cover on their own.
-        "shap", "feature importance", "which feature",
-        "what matters", "feature impact", "explain prediction", "why model",
-        "why did the model predict", "why did it predict",
-        "why does it predict", "why does the model predict",
-    ],
-    "outlier_question": ["outlier", "anomaly", "extreme values", "unusual"],
-    "missing_question": ["missing", "null", "empty", "nan", "filled"],
-}
+CONTEXT_SECTIONS = (
+    "data_question", "eda_question", "chart_question", "model_question",
+    "preprocessing_question", "shap_question", "outlier_question", "missing_question",
+)
 
 
 def _describe_chart(name: str) -> str:
@@ -132,25 +102,14 @@ class Orchestrator(PipelineOrchestrator):
             self.session_context["shap_explanation"] = value.get("explanation", "")
 
     # ------------------------------------------------------------------
-    def detect_intent(self, message: str) -> str:
-        msg = message.lower()
+    def build_context_prompt(self) -> str:
+        sections = [self._build_intent_prompt(intent) for intent in CONTEXT_SECTIONS]
+        sections = [section for section in sections if section]
+        if not sections:
+            return "No analysis has been run yet."
+        if not self.session_context.get("ml_result"):
+            sections.append("No models have been trained yet.")
 
-        if any(keyword in msg for keyword in RECOMMENDATION_KEYWORDS):
-            return "recommendation_question"
-
-        scores = {
-            intent: sum(1 for keyword in keywords if keyword in msg)
-            for intent, keywords in INTENT_KEYWORDS.items()
-        }
-        best_intent = max(scores, key=scores.get)
-
-        if scores[best_intent] == 0:
-            return "general"
-
-        return best_intent
-
-    # ------------------------------------------------------------------
-    def build_context_prompt(self, intent: str) -> str:
         domain_info = self.session_context.get("domain_info")
         domain_line = ""
         if domain_info:
@@ -158,7 +117,7 @@ class Orchestrator(PipelineOrchestrator):
                 f"Dataset Domain: {domain_info.get('display_name')} "
                 f"({domain_info.get('confidence')} confidence)\n\n"
             )
-        return domain_line + self._build_intent_prompt(intent)
+        return domain_line + "\n\n".join(sections)
 
     # ------------------------------------------------------------------
     def _build_intent_prompt(self, intent: str) -> str:
@@ -216,7 +175,7 @@ class Orchestrator(PipelineOrchestrator):
                 + f"\nColumns with no outliers: {without_outliers}"
             )
 
-        if intent == "missing_question" and ctx.get("missing_values") is not None:
+        if intent == "missing_question" and analysis_result:
             missing = ctx["missing_values"]
             missing_lines = "\n".join(f"{col}: {pct}% missing" for col, pct in missing.items())
             handling_lines = [
@@ -251,22 +210,13 @@ class Orchestrator(PipelineOrchestrator):
         if intent == "preprocessing_question" and ml_result:
             return f"Preprocessing steps: {ctx.get('preprocessing_log')}"
 
-        if intent == "recommendation_question" and (analysis_result or ml_result):
-            profile = (analysis_result or {}).get("profile", {})
-            return (
-                f"Quality score: {ctx.get('quality_score')}\n"
-                f"Best model accuracy: {ctx.get('best_accuracy')}\n"
-                f"Dataset size: {profile.get('rows')} rows"
-            )
-
-        return "No analysis has been run yet."
+        return ""
 
     # ------------------------------------------------------------------
     def chat(self, message: str) -> str:
         self.session_context["chat_history"].append({"role": "user", "content": message})
 
-        intent = self.detect_intent(message)
-        context_prompt = self.build_context_prompt(intent)
+        context_prompt = self.build_context_prompt()
 
         history_before_current = self.session_context["chat_history"][:-1]
         last_entries = history_before_current[-6:]

@@ -442,7 +442,8 @@ def _load_chat_orchestrator(session_id, db):
     print("Session ID in chat:", session_id)
 
     if session_id:
-        history = get_chat_history(db, session_id)
+        # The chat prompt only uses the last three exchanges.
+        history = get_chat_history(db, session_id, limit=6)
         orchestrator.session_context["chat_history"] = [
             {"role": m.role, "content": m.message} for m in history
         ]
