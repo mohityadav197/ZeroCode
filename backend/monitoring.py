@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +13,19 @@ def serialized_size(value):
     return len(json.dumps(value, default=str).encode("utf-8"))
 
 
+logger = logging.getLogger(__name__)
+
+# Callback registry: each callback receives one dict describing the event
+# ({"event": "start"|"complete"|"error", "agent_name", "session_id", "run_id", ...}).
+AGENT_CALLBACKS = []
+
+
+def register_callback(fn):
+    """Register fn(event: dict) to run on every agent start, complete and error event."""
+    AGENT_CALLBACKS.append(fn)
+    return fn
+
+
 class AgentMonitor:
     def __init__(self, session_id):
         self.session_id = session_id
@@ -22,14 +36,28 @@ class AgentMonitor:
                             event_type=event_type, **values))
             db.commit()
 
+    def _notify(self, agent_name, event_type, **values):
+        event = {"event": event_type, "agent_name": agent_name, "session_id": self.session_id,
+                 "run_id": current_run.get(), **values}
+        for callback in list(AGENT_CALLBACKS):
+            try:
+                callback(event)
+            except Exception:  # a faulty callback must never break the agent run
+                logger.exception("Agent callback %r failed", callback)
+
     def on_start(self, agent_name, input_data):
-        self._log(agent_name, "start", input_size=serialized_size(input_data))
+        size = serialized_size(input_data)
+        self._log(agent_name, "start", input_size=size)
+        self._notify(agent_name, "start", input_size=size)
 
     def on_complete(self, agent_name, output_data, duration_ms):
-        self._log(agent_name, "complete", output_size=serialized_size(output_data), duration_ms=duration_ms)
+        size = serialized_size(output_data)
+        self._log(agent_name, "complete", output_size=size, duration_ms=duration_ms)
+        self._notify(agent_name, "complete", output_size=size, duration_ms=duration_ms)
 
     def on_error(self, agent_name, error, traceback):
         self._log(agent_name, "error", error=str(error), traceback=traceback)
+        self._notify(agent_name, "error", error=str(error), traceback=traceback)
 
 
 def get_agent_logs(session_id):

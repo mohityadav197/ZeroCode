@@ -4,7 +4,21 @@ from abc import ABC, abstractmethod
 
 from blackboard import Blackboard
 from config import MESSAGING_MODE
+from monitoring import register_callback
 from schemas import STAGE_INPUTS, STAGE_OUTPUTS
+
+
+# Example callbacks, registered once at import time, to show the hook is pluggable and firing.
+@register_callback
+def _print_started(event):
+    if event["event"] == "start":
+        print(f"CALLBACK: Agent {event['agent_name']} started")
+
+
+@register_callback
+def _print_completed(event):
+    if event["event"] == "complete":
+        print(f"CALLBACK: Agent {event['agent_name']} completed in {event['duration_ms']:.0f}ms")
 
 
 class WorkerNode(ABC):
